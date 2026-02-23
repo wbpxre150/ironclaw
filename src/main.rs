@@ -46,6 +46,11 @@ fn init_cli_tracing() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the ring crypto provider for rustls 0.23+. Required before any
+    // TLS work (axum-server HTTPS, reqwest). Safe to call multiple times —
+    // subsequent calls return Err and are silently ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     // Handle non-agent commands first (they don't need full setup)
