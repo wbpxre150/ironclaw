@@ -57,7 +57,8 @@ impl ChannelsConfig {
                 port: parse_optional_env("HTTP_PORT", 8080)?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
-                tls_enabled: parse_bool_env("HTTP_TLS_ENABLED", false)?,
+                tls_enabled: parse_bool_env("HTTP_TLS_ENABLED", false)?
+                    || settings.channels.http_tls_enabled,
                 tls_cert_path: optional_env("HTTP_TLS_CERT")?.map(PathBuf::from),
                 tls_key_path: optional_env("HTTP_TLS_KEY")?.map(PathBuf::from),
             })
