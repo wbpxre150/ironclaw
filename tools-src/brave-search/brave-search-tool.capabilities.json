@@ -1,0 +1,35 @@
+{
+  "http": {
+    "allowlist": [
+      {
+        "host": "api.search.brave.com",
+        "path_prefix": "/res/v1/",
+        "methods": ["GET"]
+      }
+    ],
+    "credentials": {
+      "brave_search_api_key": {
+        "secret_name": "brave_search_api_key",
+        "location": { "type": "header", "name": "X-Subscription-Token" },
+        "host_patterns": ["api.search.brave.com"]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 20,
+      "requests_per_hour": 2000
+    },
+    "timeout_secs": 30
+  },
+  "secrets": {
+    "allowed_names": ["brave_search_api_key"]
+  },
+  "auth": {
+    "secret_name": "brave_search_api_key",
+    "display_name": "Brave Search",
+    "instructions": "1. Sign up at https://brave.com/search/api/\n2. Create a subscription (free tier: 2,000 queries/month)\n3. Copy your API key from the dashboard",
+    "setup_url": "https://brave.com/search/api/",
+    "token_hint": "32-character alphanumeric key from the Brave dashboard",
+    "env_var": "BRAVE_SEARCH_API_KEY",
+    "provider": "brave"
+  }
+}

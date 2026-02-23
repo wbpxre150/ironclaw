@@ -1,4 +1,8 @@
 
+# Search
+
+- [x] Brave Search - privacy-respecting web and news search; supports count, country, freshness filters
+
 # Google
 
 All Google tools share `google_oauth_token` for authentication.
