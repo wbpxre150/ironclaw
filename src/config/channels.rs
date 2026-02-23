@@ -31,6 +31,12 @@ pub struct HttpConfig {
     pub port: u16,
     pub webhook_secret: Option<SecretString>,
     pub user_id: String,
+    /// Whether TLS is enabled for the webhook server.
+    pub tls_enabled: bool,
+    /// Path to PEM certificate file (env-var fallback; prefer secrets store).
+    pub tls_cert_path: Option<std::path::PathBuf>,
+    /// Path to PEM private key file (env-var fallback; prefer secrets store).
+    pub tls_key_path: Option<std::path::PathBuf>,
 }
 
 /// Web gateway configuration.
@@ -51,6 +57,9 @@ impl ChannelsConfig {
                 port: parse_optional_env("HTTP_PORT", 8080)?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
+                tls_enabled: parse_bool_env("HTTP_TLS_ENABLED", false)?,
+                tls_cert_path: optional_env("HTTP_TLS_CERT")?.map(PathBuf::from),
+                tls_key_path: optional_env("HTTP_TLS_KEY")?.map(PathBuf::from),
             })
         } else {
             None

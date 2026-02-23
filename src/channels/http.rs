@@ -370,6 +370,9 @@ mod tests {
             port: 0,
             webhook_secret: secret.map(|s| SecretString::from(s.to_string())),
             user_id: "http".to_string(),
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         })
     }
 

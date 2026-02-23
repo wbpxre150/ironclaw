@@ -212,6 +212,10 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub http_host: Option<String>,
 
+    /// Whether HTTPS/TLS is enabled for the HTTP webhook channel.
+    #[serde(default)]
+    pub http_tls_enabled: bool,
+
     /// Telegram owner user ID. When set, the bot only responds to this user.
     /// Captured during setup by having the user message the bot.
     #[serde(default)]

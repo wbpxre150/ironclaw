@@ -679,6 +679,60 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
     })
 }
 
+/// Set up HTTPS/TLS for the HTTP webhook channel.
+///
+/// Prompts for cert and key file paths, validates that the files exist,
+/// then saves the paths as encrypted secrets so they are loaded at startup.
+pub async fn setup_http_tls(ctx: &SecretsContext) -> Result<(), ChannelSetupError> {
+    println!("HTTPS/TLS Setup:");
+    println!();
+    print_info("Provide PEM-encoded certificate and private key files.");
+    print_info("You can generate a self-signed cert with:");
+    print_info("  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes");
+    println!();
+
+    let cert_path = input("Certificate file path (PEM)")?;
+    if cert_path.is_empty() {
+        return Err(ChannelSetupError::Validation(
+            "Certificate path cannot be empty".to_string(),
+        ));
+    }
+    if !std::path::Path::new(&cert_path).exists() {
+        return Err(ChannelSetupError::Validation(format!(
+            "Certificate file not found: {}",
+            cert_path
+        )));
+    }
+
+    let key_path = input("Private key file path (PEM)")?;
+    if key_path.is_empty() {
+        return Err(ChannelSetupError::Validation(
+            "Key path cannot be empty".to_string(),
+        ));
+    }
+    if !std::path::Path::new(&key_path).exists() {
+        return Err(ChannelSetupError::Validation(format!(
+            "Key file not found: {}",
+            key_path
+        )));
+    }
+
+    ctx.save_secret(
+        "tls_webhook_cert_path",
+        &SecretString::from(cert_path.clone()),
+    )
+    .await?;
+    ctx.save_secret("tls_webhook_key_path", &SecretString::from(key_path.clone()))
+        .await?;
+
+    print_success("TLS certificate and key paths saved to secrets store");
+    print_info(&format!("Certificate: {}", cert_path));
+    print_info(&format!("Key:         {}", key_path));
+    print_info("Set HTTP_TLS_ENABLED=true in your environment to enable HTTPS.");
+
+    Ok(())
+}
+
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)

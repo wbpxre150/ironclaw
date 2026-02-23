@@ -9,7 +9,7 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, TlsConfig, WebhookServer,
         WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
@@ -401,7 +401,25 @@ async fn main() -> anyhow::Result<()> {
                 addr.ip()
             );
         }
-        let mut server = WebhookServer::new(WebhookServerConfig { addr });
+
+        // Resolve TLS config: prefer secrets store, fall back to env-var paths in HttpConfig.
+        let tls_config = if let Some(ref http_cfg) = config.channels.http {
+            if http_cfg.tls_enabled {
+                let tls = resolve_tls_from_secrets(&components.secrets_store, http_cfg).await;
+                if tls.is_none() {
+                    tracing::warn!(
+                        "HTTP_TLS_ENABLED=true but no TLS cert/key found; falling back to plain HTTP"
+                    );
+                }
+                tls
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut server = WebhookServer::new(WebhookServerConfig { addr, tls: tls_config });
         for routes in webhook_routes {
             server.add_routes(routes);
         }
@@ -1042,4 +1060,33 @@ async fn inject_channel_credentials(
     }
 
     Ok(count)
+}
+
+/// Resolve TLS paths for the webhook server.
+///
+/// Prefers the secrets store (where paths were saved by the setup wizard), then
+/// falls back to the env-var paths stored in `HttpConfig`.
+async fn resolve_tls_from_secrets(
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    http_cfg: &ironclaw::config::HttpConfig,
+) -> Option<TlsConfig> {
+    // 1. Try secrets store for paths.
+    if let Some(store) = secrets_store {
+        let cert = store.get_decrypted("default", "tls_webhook_cert_path").await.ok();
+        let key = store.get_decrypted("default", "tls_webhook_key_path").await.ok();
+        if let (Some(c), Some(k)) = (cert, key) {
+            return Some(TlsConfig {
+                cert_path: std::path::PathBuf::from(c.expose()),
+                key_path: std::path::PathBuf::from(k.expose()),
+            });
+        }
+    }
+    // 2. Fall back to env-var paths from HttpConfig.
+    match (&http_cfg.tls_cert_path, &http_cfg.tls_key_path) {
+        (Some(c), Some(k)) => Some(TlsConfig {
+            cert_path: c.clone(),
+            key_path: k.clone(),
+        }),
+        _ => None,
+    }
 }

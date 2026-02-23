@@ -40,4 +40,4 @@ pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
 pub use web::GatewayChannel;
-pub use webhook_server::{WebhookServer, WebhookServerConfig};
+pub use webhook_server::{TlsConfig, WebhookServer, WebhookServerConfig};

@@ -4,6 +4,7 @@
 //! into a single axum server. Channels define routes but never spawn servers.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use axum::Router;
 use tokio::sync::oneshot;
@@ -11,10 +12,18 @@ use tokio::task::JoinHandle;
 
 use crate::error::ChannelError;
 
+/// TLS certificate and key paths for the webhook server.
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
 /// Configuration for the unified webhook server.
 pub struct WebhookServerConfig {
     /// Address to bind the server to.
     pub addr: SocketAddr,
+    /// Optional TLS configuration. When present, the server uses HTTPS.
+    pub tls: Option<TlsConfig>,
 }
 
 /// A single HTTP server that hosts all webhook routes.
@@ -52,31 +61,71 @@ impl WebhookServer {
             app = app.merge(fragment);
         }
 
-        let listener = tokio::net::TcpListener::bind(self.config.addr)
-            .await
-            .map_err(|e| ChannelError::StartupFailed {
-                name: "webhook_server".to_string(),
-                reason: format!("Failed to bind to {}: {}", self.config.addr, e),
-            })?;
+        let addr = self.config.addr;
 
-        tracing::info!("Webhook server listening on {}", self.config.addr);
+        if let Some(ref tls) = self.config.tls {
+            let rustls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                    .await
+                    .map_err(|e| ChannelError::StartupFailed {
+                        name: "webhook_server".to_string(),
+                        reason: format!("Failed to load TLS certificate/key: {}", e),
+                    })?;
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        self.shutdown_tx = Some(shutdown_tx);
+            tracing::info!("Webhook server (HTTPS) listening on {}", addr);
 
-        let handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
+            let axum_handle = axum_server::Handle::new();
+            let shutdown_handle = axum_handle.clone();
+
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            self.shutdown_tx = Some(shutdown_tx);
+
+            let handle = tokio::spawn(async move {
+                // Drive the shutdown signal into the axum-server handle.
+                tokio::spawn(async move {
                     let _ = shutdown_rx.await;
                     tracing::info!("Webhook server shutting down");
-                })
-                .await
-            {
-                tracing::error!("Webhook server error: {}", e);
-            }
-        });
+                    shutdown_handle.graceful_shutdown(None);
+                });
 
-        self.handle = Some(handle);
+                if let Err(e) = axum_server::bind_rustls(addr, rustls_config)
+                    .handle(axum_handle)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    tracing::error!("Webhook server (HTTPS) error: {}", e);
+                }
+            });
+
+            self.handle = Some(handle);
+        } else {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: "webhook_server".to_string(),
+                    reason: format!("Failed to bind to {}: {}", addr, e),
+                })?;
+
+            tracing::info!("Webhook server listening on {}", addr);
+
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            self.shutdown_tx = Some(shutdown_tx);
+
+            let handle = tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                        tracing::info!("Webhook server shutting down");
+                    })
+                    .await
+                {
+                    tracing::error!("Webhook server error: {}", e);
+                }
+            });
+
+            self.handle = Some(handle);
+        }
+
         Ok(())
     }
 

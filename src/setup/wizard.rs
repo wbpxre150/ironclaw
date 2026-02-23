@@ -27,7 +27,7 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_telegram, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_http_tls, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_header, print_info, print_step,
@@ -1536,10 +1536,27 @@ impl SetupWizard {
                 let result = setup_http(ctx).await?;
                 self.settings.channels.http_enabled = result.enabled;
                 self.settings.channels.http_port = Some(result.port);
+
+                // Offer HTTPS/TLS setup (required for Telegram webhook integration).
+                println!();
+                if confirm("Enable HTTPS/TLS for the webhook? (required for Telegram)", false)? {
+                    match setup_http_tls(ctx).await {
+                        Ok(()) => {
+                            self.settings.channels.http_tls_enabled = true;
+                        }
+                        Err(e) => {
+                            print_error(&format!("TLS setup failed: {}", e));
+                            print_info(
+                                "Set HTTP_TLS_CERT and HTTP_TLS_KEY env vars to configure TLS manually.",
+                            );
+                        }
+                    }
+                }
             } else {
                 self.settings.channels.http_enabled = true;
                 self.settings.channels.http_port = Some(8080);
                 print_info("HTTP webhook enabled on port 8080 (set HTTP_WEBHOOK_SECRET in env)");
+                print_info("For TLS, set HTTP_TLS_ENABLED=true, HTTP_TLS_CERT=, HTTP_TLS_KEY= in env.");
             }
         } else {
             self.settings.channels.http_enabled = false;
