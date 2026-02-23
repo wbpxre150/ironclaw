@@ -739,6 +739,57 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
+/// Extract the schema and description from a WASM component by briefly instantiating it.
+///
+/// Creates a minimal no-op store (no capabilities, no secrets) and calls the
+/// `schema()` and `description()` WIT exports. Used during tool registration so
+/// the LLM receives the real parameter schema rather than an empty placeholder.
+///
+/// Called synchronously from within `WasmToolRuntime::prepare` (already in a
+/// `spawn_blocking` context).
+pub(super) fn extract_tool_metadata(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+) -> Result<(String, serde_json::Value), WasmError> {
+    // Minimal store: no capabilities, no credentials.
+    let store_data = StoreData::new(
+        4 * 1024 * 1024, // 4 MB — plenty for constant-string returns
+        Capabilities::default(),
+        HashMap::new(),
+        vec![],
+    );
+    let mut store = Store::new(engine, store_data);
+
+    // Try to set a generous fuel limit so schema()/description() can never spin.
+    // Silently ignore the error if fuel consumption wasn't enabled in this engine.
+    let _ = store.set_fuel(1_000_000);
+
+    let mut linker = Linker::new(engine);
+    WasmToolWrapper::add_host_functions(&mut linker)?;
+
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+
+    let tool_iface = instance.near_agent_tool();
+
+    let description = tool_iface
+        .call_description(&mut store)
+        .map_err(|e| WasmError::Trapped(format!("Failed to call description(): {e}")))?;
+
+    let schema_str = tool_iface
+        .call_schema(&mut store)
+        .map_err(|e| WasmError::Trapped(format!("Failed to call schema(): {e}")))?;
+
+    let schema: serde_json::Value =
+        serde_json::from_str(&schema_str).map_err(|e| {
+            WasmError::InvalidResponseJson(format!(
+                "Tool schema() returned invalid JSON ({e}): {schema_str}"
+            ))
+        })?;
+
+    Ok((description, schema))
+}
+
 /// Refresh an expired OAuth access token using the stored refresh token.
 ///
 /// Posts to the provider's token endpoint with `grant_type=refresh_token`,
