@@ -912,6 +912,21 @@ async fn setup_wasm_channels(
                 config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
             }
 
+            // For Telegram with TLS enabled, inject the cert PEM so that
+            // setWebhook can send it to Telegram for self-signed cert support.
+            if channel_name == "telegram" {
+                if let Some(ref http_cfg) = config.channels.http {
+                    if http_cfg.tls_enabled {
+                        if let Some(pem) = load_tls_cert_pem(secrets_store).await {
+                            config_updates.insert(
+                                "tls_cert_pem".to_string(),
+                                serde_json::Value::String(pem),
+                            );
+                        }
+                    }
+                }
+            }
+
             if !config_updates.is_empty() {
                 channel_arc.update_config(config_updates).await;
                 tracing::info!(
@@ -1093,5 +1108,35 @@ async fn resolve_tls_from_secrets(
             key_path: k.clone(),
         }),
         _ => None,
+    }
+}
+
+/// Read the TLS certificate PEM content for Telegram's setWebhook self-signed cert upload.
+///
+/// Resolves the cert path from the secrets store (preferred) or the env-var fallback,
+/// then reads the file from disk and returns the PEM text.
+async fn load_tls_cert_pem(
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    let cert_path = if let Some(store) = secrets_store {
+        store
+            .get_decrypted("default", "tls_webhook_cert_path")
+            .await
+            .ok()
+            .map(|d| std::path::PathBuf::from(d.expose()))
+    } else {
+        None
+    }?;
+
+    match std::fs::read_to_string(&cert_path) {
+        Ok(pem) => Some(pem),
+        Err(e) => {
+            tracing::warn!(
+                path = %cert_path.display(),
+                error = %e,
+                "Failed to read TLS cert for Telegram setWebhook"
+            );
+            None
+        }
     }
 }

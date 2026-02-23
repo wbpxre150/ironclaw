@@ -236,6 +236,12 @@ struct TelegramConfig {
     /// Telegram will include this in the X-Telegram-Bot-Api-Secret-Token header.
     #[serde(default)]
     webhook_secret: Option<String>,
+
+    /// PEM-encoded TLS certificate for self-signed cert support (injected by host).
+    /// When present, the cert is uploaded to Telegram via setWebhook so that
+    /// Telegram can verify the server's self-signed certificate.
+    #[serde(default)]
+    tls_cert_pem: Option<String>,
 }
 
 // ============================================================================
@@ -380,7 +386,7 @@ impl Guest for TelegramChannel {
                     &format!("Registering webhook: {}/webhook/telegram", tunnel_url),
                 );
 
-                if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
+                if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref(), config.tls_cert_pem.as_deref()) {
                     channel_host::log(
                         channel_host::LogLevel::Error,
                         &format!("Failed to register webhook: {}", e),
@@ -871,28 +877,60 @@ fn delete_webhook() -> Result<(), String> {
 /// Register webhook URL with Telegram API.
 ///
 /// Called during on_start() when tunnel_url is configured.
-fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<(), String> {
+///
+/// When `tls_cert_pem` is provided the request uses multipart/form-data so
+/// that Telegram can verify a self-signed certificate. Without a cert the
+/// faster JSON body is used (suitable for CA-signed certs or tunnels).
+fn register_webhook(
+    tunnel_url: &str,
+    webhook_secret: Option<&str>,
+    tls_cert_pem: Option<&str>,
+) -> Result<(), String> {
     let webhook_url = format!("{}/webhook/telegram", tunnel_url);
 
-    // Build setWebhook request body
-    let mut body = serde_json::json!({
-        "url": webhook_url,
-        "allowed_updates": ["message", "edited_message"]
-    });
+    let (body_bytes, content_type) = if let Some(pem) = tls_cert_pem {
+        // Multipart/form-data body — required when uploading a self-signed cert.
+        let boundary = "IronclawTlsBoundary";
+        let mut body: Vec<u8> = Vec::new();
 
-    if let Some(secret) = webhook_secret {
-        body["secret_token"] = serde_json::Value::String(secret.to_string());
-    }
+        // Field: url
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"url\"\r\n\r\n{webhook_url}\r\n").as_bytes());
 
-    let body_bytes =
-        serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize body: {}", e))?;
+        // Field: allowed_updates
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"allowed_updates\"\r\n\r\n[\"message\",\"edited_message\"]\r\n").as_bytes());
 
-    let headers = serde_json::json!({
-        "Content-Type": "application/json"
-    });
+        // Field: secret_token (optional)
+        if let Some(secret) = webhook_secret {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"secret_token\"\r\n\r\n{secret}\r\n").as_bytes());
+        }
 
-    // Make HTTP request to Telegram API
-    // Note: {TELEGRAM_BOT_TOKEN} is replaced by host with the actual token
+        // Field: certificate (the PEM file)
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"certificate\"; filename=\"cert.pem\"\r\nContent-Type: application/x-pem-file\r\n\r\n").as_bytes());
+        body.extend_from_slice(pem.as_bytes());
+        body.extend_from_slice(b"\r\n");
+
+        // Closing boundary
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        (body, ct)
+    } else {
+        // Plain JSON body — used when a CA-signed cert or a tunnel is in place.
+        let mut json_body = serde_json::json!({
+            "url": webhook_url,
+            "allowed_updates": ["message", "edited_message"]
+        });
+        if let Some(secret) = webhook_secret {
+            json_body["secret_token"] = serde_json::Value::String(secret.to_string());
+        }
+        let bytes = serde_json::to_vec(&json_body)
+            .map_err(|e| format!("Failed to serialize body: {}", e))?;
+        (bytes, "application/json".to_string())
+    };
+
+    let headers = serde_json::json!({ "Content-Type": content_type });
+
+    // Note: {TELEGRAM_BOT_TOKEN} is replaced by the host with the actual token.
     let result = channel_host::http_request(
         "POST",
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
@@ -908,7 +946,6 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
                 return Err(format!("HTTP {}: {}", response.status, body_str));
             }
 
-            // Parse Telegram API response
             let api_response: TelegramApiResponse<serde_json::Value> =
                 serde_json::from_slice(&response.body)
                     .map_err(|e| format!("Failed to parse response: {}", e))?;
