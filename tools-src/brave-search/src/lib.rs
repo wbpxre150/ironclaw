@@ -18,6 +18,24 @@ wit_bindgen::generate!({
 
 use serde::Deserialize;
 
+fn default_action() -> String {
+    "web_search".to_string()
+}
+
+/// Flat parameter struct for brave search.
+///
+/// Uses a default for `action` so callers that just pass `{"query":"..."}` get
+/// a web search rather than a confusing "missing field 'action'" error.
+#[derive(Debug, Deserialize)]
+struct BraveSearchParams {
+    #[serde(default = "default_action")]
+    action: String,
+    query: String,
+    count: Option<u8>,
+    country: Option<String>,
+    freshness: Option<String>,
+}
+
 /// Percent-encode a string for use as a URL query parameter value.
 fn url_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
@@ -38,25 +56,6 @@ fn url_encode_query(s: &str) -> String {
 }
 
 struct BraveSearchTool;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action")]
-enum BraveSearchAction {
-    #[serde(rename = "web_search")]
-    WebSearch {
-        query: String,
-        count: Option<u8>,
-        country: Option<String>,
-        freshness: Option<String>,
-    },
-    #[serde(rename = "news_search")]
-    NewsSearch {
-        query: String,
-        count: Option<u8>,
-        country: Option<String>,
-        freshness: Option<String>,
-    },
-}
 
 impl exports::near::agent::tool::Guest for BraveSearchTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
@@ -85,7 +84,7 @@ impl exports::near::agent::tool::Guest for BraveSearchTool {
 }
 
 fn execute_inner(params: &str) -> Result<String, String> {
-    let action: BraveSearchAction =
+    let p: BraveSearchParams =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
 
     // Pre-flight check: ensure API key exists in secret store.
@@ -99,26 +98,17 @@ fn execute_inner(params: &str) -> Result<String, String> {
         );
     }
 
-    match action {
-        BraveSearchAction::WebSearch {
-            query,
-            count,
-            country,
-            freshness,
-        } => search("web", &query, count, country.as_deref(), freshness.as_deref()),
-        BraveSearchAction::NewsSearch {
-            query,
-            count,
-            country,
-            freshness,
-        } => search(
-            "news",
-            &query,
-            count,
-            country.as_deref(),
-            freshness.as_deref(),
-        ),
-    }
+    let kind = match p.action.as_str() {
+        "web_search" => "web",
+        "news_search" => "news",
+        other => {
+            return Err(format!(
+                "Unknown action '{other}': must be 'web_search' or 'news_search'"
+            ));
+        }
+    };
+
+    search(kind, &p.query, p.count, p.country.as_deref(), p.freshness.as_deref())
 }
 
 fn search(
@@ -267,8 +257,8 @@ fn format_results(kind: &str, json: &str) -> Result<String, String> {
 const SCHEMA: &str = r#"{
     "type": "object",
     "properties": {
-        "action":    { "type": "string", "enum": ["web_search", "news_search"],
-                       "description": "Type of search: web_search for general results, news_search for recent news" },
+        "action":    { "type": "string", "enum": ["web_search", "news_search"], "default": "web_search",
+                       "description": "Type of search: web_search for general web results (default), news_search for recent news" },
         "query":     { "type": "string", "description": "Search query (max 400 characters)" },
         "count":     { "type": "integer", "minimum": 1, "maximum": 20, "default": 5,
                        "description": "Number of results to return (1-20)" },
@@ -277,7 +267,7 @@ const SCHEMA: &str = r#"{
         "freshness": { "type": "string", "enum": ["pd", "pw", "pm", "py"],
                        "description": "Filter by age: pd=past day, pw=past week, pm=past month, py=past year" }
     },
-    "required": ["action", "query"]
+    "required": ["query"]
 }"#;
 
 export!(BraveSearchTool);
@@ -366,6 +356,32 @@ mod tests {
 
     #[test]
     fn test_schema_is_valid_json() {
-        let _: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        let v: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        // action should NOT be required (it has a default)
+        let required = v["required"].as_array().unwrap();
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(!names.contains(&"action"), "action should not be required");
+        assert!(names.contains(&"query"), "query must be required");
+    }
+
+    #[test]
+    fn test_params_action_defaults_to_web_search() {
+        // Simulates the LLM omitting the action field entirely
+        let p: BraveSearchParams = serde_json::from_str(r#"{"query":"rust"}"#).unwrap();
+        assert_eq!(p.action, "web_search");
+        assert_eq!(p.query, "rust");
+    }
+
+    #[test]
+    fn test_params_explicit_news_action() {
+        let p: BraveSearchParams =
+            serde_json::from_str(r#"{"action":"news_search","query":"rust"}"#).unwrap();
+        assert_eq!(p.action, "news_search");
+    }
+
+    #[test]
+    fn test_params_missing_query_is_error() {
+        let result: Result<BraveSearchParams, _> = serde_json::from_str(r#"{}"#);
+        assert!(result.is_err(), "query is required; empty object should fail");
     }
 }
