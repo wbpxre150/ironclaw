@@ -751,18 +751,22 @@ pub(super) fn extract_tool_metadata(
     engine: &wasmtime::Engine,
     component: &wasmtime::component::Component,
 ) -> Result<(String, serde_json::Value), WasmError> {
-    // Minimal store: no capabilities, no credentials.
+    use crate::tools::wasm::limits::{DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT};
+
+    // Use the same defaults as execute_sync so component instantiation succeeds.
     let store_data = StoreData::new(
-        4 * 1024 * 1024, // 4 MB — plenty for constant-string returns
+        DEFAULT_MEMORY_LIMIT, // 10 MB — matches execution default
         Capabilities::default(),
         HashMap::new(),
         vec![],
     );
     let mut store = Store::new(engine, store_data);
 
-    // Try to set a generous fuel limit so schema()/description() can never spin.
-    // Silently ignore the error if fuel consumption wasn't enabled in this engine.
-    let _ = store.set_fuel(1_000_000);
+    // Attach the resource limiter (component model tracks memory/instances through it).
+    store.limiter(|data| &mut data.limiter);
+
+    // Set fuel to the execution default; silently skip if the engine has fuel disabled.
+    let _ = store.set_fuel(DEFAULT_FUEL_LIMIT);
 
     let mut linker = Linker::new(engine);
     WasmToolWrapper::add_host_functions(&mut linker)?;
