@@ -309,10 +309,10 @@ impl Channel for HttpChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         if self.state.webhook_secret.is_none() {
-            return Err(ChannelError::StartupFailed {
-                name: "http".to_string(),
-                reason: "HTTP webhook secret is required (set HTTP_WEBHOOK_SECRET)".to_string(),
-            });
+            tracing::warn!(
+                "HTTP webhook has no secret configured — all requests will be accepted. \
+                 Set HTTP_WEBHOOK_SECRET to require authentication."
+            );
         }
 
         let (tx, rx) = mpsc::channel(256);
@@ -377,10 +377,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_channel_requires_secret() {
+    async fn test_http_channel_starts_without_secret() {
+        // No secret configured — channel should start and accept all requests.
         let channel = test_channel(None);
         let result = channel.start().await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
