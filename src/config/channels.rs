@@ -51,10 +51,15 @@ pub struct GatewayConfig {
 
 impl ChannelsConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
+        let http = if optional_env("HTTP_PORT")?.is_some()
+            || optional_env("HTTP_HOST")?.is_some()
+            || settings.channels.http_enabled
+        {
             Some(HttpConfig {
-                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
-                port: parse_optional_env("HTTP_PORT", 8080)?,
+                host: optional_env("HTTP_HOST")?
+                    .or_else(|| settings.channels.http_host.clone())
+                    .unwrap_or_else(|| "0.0.0.0".to_string()),
+                port: parse_optional_env("HTTP_PORT", settings.channels.http_port.unwrap_or(8080))?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
                 tls_enabled: parse_bool_env("HTTP_TLS_ENABLED", false)?
