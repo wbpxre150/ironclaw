@@ -1539,7 +1539,10 @@ impl SetupWizard {
 
                 // Offer HTTPS/TLS setup (required for Telegram webhook integration).
                 println!();
-                if confirm("Enable HTTPS/TLS for the webhook? (required for Telegram)", false)? {
+                if confirm(
+                    "Enable HTTPS/TLS for the webhook? (required for Telegram)",
+                    false,
+                )? {
                     match setup_http_tls(ctx).await {
                         Ok(()) => {
                             self.settings.channels.http_tls_enabled = true;
@@ -1556,7 +1559,9 @@ impl SetupWizard {
                 self.settings.channels.http_enabled = true;
                 self.settings.channels.http_port = Some(8080);
                 print_info("HTTP webhook enabled on port 8080 (set HTTP_WEBHOOK_SECRET in env)");
-                print_info("For TLS, set HTTP_TLS_ENABLED=true, HTTP_TLS_CERT=, HTTP_TLS_KEY= in env.");
+                print_info(
+                    "For TLS, set HTTP_TLS_ENABLED=true, HTTP_TLS_CERT=, HTTP_TLS_KEY= in env.",
+                );
             }
         } else {
             self.settings.channels.http_enabled = false;

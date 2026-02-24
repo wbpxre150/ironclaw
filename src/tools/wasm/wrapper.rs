@@ -751,7 +751,7 @@ pub(super) fn extract_tool_metadata(
     engine: &wasmtime::Engine,
     component: &wasmtime::component::Component,
 ) -> Result<(String, serde_json::Value), WasmError> {
-    use crate::tools::wasm::limits::{DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT};
+    use crate::tools::wasm::limits::{DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT};
 
     // Use the same defaults as execute_sync so component instantiation succeeds.
     let store_data = StoreData::new(
@@ -767,6 +767,14 @@ pub(super) fn extract_tool_metadata(
 
     // Set fuel to the execution default; silently skip if the engine has fuel disabled.
     let _ = store.set_fuel(DEFAULT_FUEL_LIMIT);
+
+    // Configure epoch deadline — required whenever epoch_interruption is enabled on the engine.
+    // Without set_epoch_deadline(), the deadline stays at 0 (the initial value in VMRuntimeLimits)
+    // and the background epoch ticker thread immediately fires Trap::Interrupt on the first WASM
+    // call, before any instructions execute (and before any fuel is consumed).
+    store.epoch_deadline_trap();
+    let ticks = (DEFAULT_TIMEOUT.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
+    store.set_epoch_deadline(ticks);
 
     let mut linker = Linker::new(engine);
     WasmToolWrapper::add_host_functions(&mut linker)?;
@@ -784,12 +792,11 @@ pub(super) fn extract_tool_metadata(
         .call_schema(&mut store)
         .map_err(|e| WasmError::Trapped(format!("Failed to call schema(): {e}")))?;
 
-    let schema: serde_json::Value =
-        serde_json::from_str(&schema_str).map_err(|e| {
-            WasmError::InvalidResponseJson(format!(
-                "Tool schema() returned invalid JSON ({e}): {schema_str}"
-            ))
-        })?;
+    let schema: serde_json::Value = serde_json::from_str(&schema_str).map_err(|e| {
+        WasmError::InvalidResponseJson(format!(
+            "Tool schema() returned invalid JSON ({e}): {schema_str}"
+        ))
+    })?;
 
     Ok((description, schema))
 }

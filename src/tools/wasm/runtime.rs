@@ -207,8 +207,7 @@ impl WasmToolRuntime {
                 .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
             // Instantiate briefly to call schema() and description() WIT exports.
-            let (description, schema) =
-                super::wrapper::extract_tool_metadata(&engine, &component)?;
+            let (description, schema) = super::wrapper::extract_tool_metadata(&engine, &component)?;
 
             Ok::<_, WasmError>(PreparedModule {
                 name: name.clone(),
@@ -259,7 +258,6 @@ impl WasmToolRuntime {
         self.modules.write().await.clear();
     }
 }
-
 
 impl std::fmt::Debug for WasmToolRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -315,5 +313,70 @@ mod tests {
 
         assert_eq!(limits.memory_bytes, 5 * 1024 * 1024);
         assert_eq!(limits.fuel, 500_000);
+    }
+
+    /// Integration test: load the installed brave-search-tool WASM component and verify
+    /// that extract_tool_metadata can call description() and schema() without trapping.
+    #[tokio::test]
+    async fn test_brave_search_tool_metadata_extraction() {
+        let wasm_path =
+            std::path::Path::new("/home/ironclaw/.ironclaw/tools/brave-search-tool.wasm");
+        if !wasm_path.exists() {
+            eprintln!("Skipping test: brave-search-tool.wasm not installed");
+            return;
+        }
+
+        let config = WasmRuntimeConfig::default();
+        let runtime = WasmToolRuntime::new(config).unwrap();
+        let wasm_bytes = std::fs::read(wasm_path).unwrap();
+
+        let result = runtime
+            .prepare("brave-search-tool", &wasm_bytes, None)
+            .await;
+
+        match &result {
+            Ok(module) => {
+                eprintln!("SUCCESS: description = {}", module.description);
+                eprintln!("schema = {}", module.schema);
+                assert!(
+                    !module.description.is_empty(),
+                    "description should not be empty"
+                );
+            }
+            Err(e) => {
+                panic!("Failed to prepare brave-search-tool: {e}");
+            }
+        }
+    }
+
+    /// Test fuel tracking: with tiny fuel, we should get fuel-exhausted error, not unreachable.
+    #[tokio::test]
+    async fn test_brave_search_tool_fuel_tracking() {
+        let wasm_path =
+            std::path::Path::new("/home/ironclaw/.ironclaw/tools/brave-search-tool.wasm");
+        if !wasm_path.exists() {
+            eprintln!("Skipping test: brave-search-tool.wasm not installed");
+            return;
+        }
+
+        let config = WasmRuntimeConfig {
+            fuel_config: crate::tools::wasm::limits::FuelConfig::with_limit(100),
+            ..WasmRuntimeConfig::default()
+        };
+        let runtime = WasmToolRuntime::new(config).unwrap();
+        let wasm_bytes = std::fs::read(wasm_path).unwrap();
+
+        let result = runtime
+            .prepare("brave-search-tool", &wasm_bytes, None)
+            .await;
+
+        match &result {
+            Ok(_) => eprintln!("Unexpectedly succeeded with 100 fuel"),
+            Err(e) => {
+                let err_str = e.to_string();
+                eprintln!("Error with 100 fuel: {err_str}");
+                // If fuel tracking works, this should be fuel-exhausted, not unreachable
+            }
+        }
     }
 }

@@ -688,7 +688,9 @@ pub async fn setup_http_tls(ctx: &SecretsContext) -> Result<(), ChannelSetupErro
     println!();
     print_info("Provide PEM-encoded certificate and private key files.");
     print_info("You can generate a self-signed cert with:");
-    print_info("  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes");
+    print_info(
+        "  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes",
+    );
     println!();
 
     let cert_path = input("Certificate file path (PEM)")?;
@@ -722,8 +724,11 @@ pub async fn setup_http_tls(ctx: &SecretsContext) -> Result<(), ChannelSetupErro
         &SecretString::from(cert_path.clone()),
     )
     .await?;
-    ctx.save_secret("tls_webhook_key_path", &SecretString::from(key_path.clone()))
-        .await?;
+    ctx.save_secret(
+        "tls_webhook_key_path",
+        &SecretString::from(key_path.clone()),
+    )
+    .await?;
 
     print_success("TLS certificate and key paths saved to secrets store");
     print_info(&format!("Certificate: {}", cert_path));

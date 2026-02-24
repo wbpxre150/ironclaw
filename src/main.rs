@@ -424,7 +424,10 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-        let mut server = WebhookServer::new(WebhookServerConfig { addr, tls: tls_config });
+        let mut server = WebhookServer::new(WebhookServerConfig {
+            addr,
+            tls: tls_config,
+        });
         for routes in webhook_routes {
             server.add_routes(routes);
         }
@@ -914,17 +917,13 @@ async fn setup_wasm_channels(
 
             // For Telegram with TLS enabled, inject the cert PEM so that
             // setWebhook can send it to Telegram for self-signed cert support.
-            if channel_name == "telegram" {
-                if let Some(ref http_cfg) = config.channels.http {
-                    if http_cfg.tls_enabled {
-                        if let Some(pem) = load_tls_cert_pem(secrets_store).await {
-                            config_updates.insert(
-                                "tls_cert_pem".to_string(),
-                                serde_json::Value::String(pem),
-                            );
-                        }
-                    }
-                }
+            if channel_name == "telegram"
+                && let Some(ref http_cfg) = config.channels.http
+                && http_cfg.tls_enabled
+                && let Some(pem) = load_tls_cert_pem(secrets_store).await
+            {
+                config_updates
+                    .insert("tls_cert_pem".to_string(), serde_json::Value::String(pem));
             }
 
             if !config_updates.is_empty() {
@@ -1092,8 +1091,14 @@ async fn resolve_tls_from_secrets(
 ) -> Option<TlsConfig> {
     // 1. Try secrets store for paths.
     if let Some(store) = secrets_store {
-        let cert = store.get_decrypted("default", "tls_webhook_cert_path").await.ok();
-        let key = store.get_decrypted("default", "tls_webhook_key_path").await.ok();
+        let cert = store
+            .get_decrypted("default", "tls_webhook_cert_path")
+            .await
+            .ok();
+        let key = store
+            .get_decrypted("default", "tls_webhook_key_path")
+            .await
+            .ok();
         if let (Some(c), Some(k)) = (cert, key) {
             return Some(TlsConfig {
                 cert_path: std::path::PathBuf::from(c.expose()),

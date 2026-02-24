@@ -99,12 +99,12 @@ impl WebhookServer {
 
             self.handle = Some(handle);
         } else {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| ChannelError::StartupFailed {
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                ChannelError::StartupFailed {
                     name: "webhook_server".to_string(),
                     reason: format!("Failed to bind to {}: {}", addr, e),
-                })?;
+                }
+            })?;
 
             tracing::info!("Webhook server listening on {}", addr);
 
