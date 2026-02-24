@@ -1,0 +1,41 @@
+{
+  "name": "browser-use",
+  "display_name": "Browser Use",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Browser automation via Chrome DevTools Protocol (CDP). Navigate, click, fill forms, take screenshots, extract content, and manage persistent browser sessions. Requires Docker for the Browserless sidecar.",
+  "keywords": ["browser", "automation", "web", "scraping", "navigation", "screenshot", "cdp"],
+
+  "source": {
+    "dir": "tools-src/browser-use",
+    "capabilities": "browser-use-tool.capabilities.json",
+    "crate_name": "browser-use-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/browser-use-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "sidecar": {
+    "name": "browserless",
+    "image": "ghcr.io/browserless/chromium:latest",
+    "env_vars": {
+      "enable": "BROWSERLESS_ENABLED=true",
+      "port": "BROWSERLESS_PORT=9222"
+    },
+    "setup_note": "Set SIDECAR_ENABLED=true and BROWSERLESS_ENABLED=true in your .env. Docker must be running."
+  },
+
+  "auth_summary": {
+    "method": "none",
+    "provider": null,
+    "secrets": [],
+    "shared_auth": null,
+    "setup_url": null
+  },
+
+  "tags": ["default", "browser", "automation"]
+}
