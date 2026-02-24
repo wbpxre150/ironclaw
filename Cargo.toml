@@ -15,6 +15,7 @@ exclude = [
     "tools-src/okta",
     "tools-src/slack",
     "tools-src/telegram",
+    "tools-src/browser-use",
 ]
 
 [package]
@@ -151,10 +152,15 @@ bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
+tempfile = "3"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
+
+# WebSocket client for persistent CDP sessions
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -167,7 +173,6 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"

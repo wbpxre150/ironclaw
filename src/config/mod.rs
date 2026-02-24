@@ -18,6 +18,7 @@ mod routines;
 mod safety;
 mod sandbox;
 mod secrets;
+mod sidecar;
 mod skills;
 mod tunnel;
 mod wasm;
@@ -44,6 +45,7 @@ pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
+pub use self::sidecar::SidecarConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
@@ -73,6 +75,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub sidecar: SidecarConfig,
     pub skills: SkillsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
@@ -197,6 +200,7 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            sidecar: SidecarConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),

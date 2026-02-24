@@ -489,7 +489,7 @@ mod tests {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
-            chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            chat_rate_limiter: Arc::new(crate::channels::web::server::RateLimiter::new(30, 60)),
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),

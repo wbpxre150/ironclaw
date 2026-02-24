@@ -656,6 +656,7 @@ impl WasmChannel {
             .get_or_insert_with(|| crate::tools::wasm::WorkspaceCapability {
                 allowed_prefixes: Vec::new(),
                 reader: None,
+                writer: None,
             });
         ws_cap.reader = Some(Arc::clone(store) as Arc<dyn crate::tools::wasm::WorkspaceReader>);
         caps

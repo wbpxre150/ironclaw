@@ -30,6 +30,7 @@ use ironclaw::{
     },
     pairing::PairingStore,
     secrets::SecretsStore,
+    sidecar::SidecarManager,
 };
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -546,6 +547,46 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|c| c.model_name().to_string());
 
+    // Initialize sidecar managers for external services (e.g., browserless)
+    let sidecar_managers: Vec<std::sync::Arc<SidecarManager>> = if config.sidecar.any_enabled() {
+        let mut managers = Vec::new();
+
+        if config.sidecar.browserless_enabled {
+            let manager =
+                std::sync::Arc::new(SidecarManager::new(config.sidecar.to_browserless_config()));
+            managers.push(manager);
+            tracing::info!(
+                "Browserless sidecar configured (port {})",
+                config.sidecar.browserless_port
+            );
+        }
+
+        for manager in &managers {
+            match manager.ensure_ready().await {
+                Ok(endpoint) => {
+                    tracing::info!(
+                        sidecar = %manager.config().name,
+                        endpoint = %endpoint,
+                        "Sidecar started and ready"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        sidecar = %manager.config().name,
+                        error = %e,
+                        "Failed to start sidecar"
+                    );
+                }
+            }
+        }
+
+        managers
+    } else {
+        Vec::new()
+    };
+
+    let channels = Arc::new(channels);
+
     if config.channels.cli.enabled && cli.message.is_none() {
         let boot_info = ironclaw::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -585,8 +626,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Run the agent ──────────────────────────────────────────────────
-
-    let channels = Arc::new(channels);
 
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
@@ -634,6 +673,12 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Shutdown ────────────────────────────────────────────────────────
 
+    // Shut down sidecar containers
+    for manager in &sidecar_managers {
+        manager.shutdown().await;
+    }
+
+    // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
     }
@@ -922,8 +967,7 @@ async fn setup_wasm_channels(
                 && http_cfg.tls_enabled
                 && let Some(pem) = load_tls_cert_pem(secrets_store).await
             {
-                config_updates
-                    .insert("tls_cert_pem".to_string(), serde_json::Value::String(pem));
+                config_updates.insert("tls_cert_pem".to_string(), serde_json::Value::String(pem));
             }
 
             if !config_updates.is_empty() {

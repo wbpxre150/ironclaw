@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
+use wasmtime::component::Component;
 use wasmtime::{Config, Engine, OptLevel};
 
 use crate::tools::wasm::error::WasmError;
@@ -63,9 +64,9 @@ impl WasmRuntimeConfig {
 
 /// A compiled WASM component ready for instantiation.
 ///
-/// Contains the pre-compiled component plus cached metadata extracted
-/// from the component during preparation. Stores the compiled `Component`
-/// directly so instantiation doesn't require recompilation.
+/// Contains the pre-compiled `Component` plus cached metadata extracted
+/// from the component during preparation. The compiled `Component` is
+/// reused across executions, avoiding recompilation from raw bytes.
 pub struct PreparedModule {
     /// Tool name.
     pub name: String,
@@ -73,17 +74,12 @@ pub struct PreparedModule {
     pub description: String,
     /// Parameter schema JSON (cached from component).
     pub schema: serde_json::Value,
-    /// Pre-compiled component (cheaply cloneable via internal Arc).
-    component: wasmtime::component::Component,
+    /// Pre-compiled Wasmtime component (reused across executions).
+    compiled_component: Component,
+    /// Raw component bytes (kept for serialization/caching to disk).
+    component_bytes: Vec<u8>,
     /// Resource limits for this tool.
     pub limits: ResourceLimits,
-}
-
-impl PreparedModule {
-    /// Get the pre-compiled component for instantiation.
-    pub fn component(&self) -> &wasmtime::component::Component {
-        &self.component
-    }
 }
 
 impl std::fmt::Debug for PreparedModule {
@@ -93,6 +89,18 @@ impl std::fmt::Debug for PreparedModule {
             .field("description", &self.description)
             .field("limits", &self.limits)
             .finish()
+    }
+}
+
+impl PreparedModule {
+    /// Get the compiled component bytes (for serialization/disk caching).
+    pub fn component_bytes(&self) -> &[u8] {
+        &self.component_bytes
+    }
+
+    /// Get the pre-compiled Wasmtime component (avoids recompilation on each execution).
+    pub fn compiled_component(&self) -> &Component {
+        &self.compiled_component
     }
 }
 
@@ -213,7 +221,8 @@ impl WasmToolRuntime {
                 name: name.clone(),
                 description,
                 schema,
-                component,
+                compiled_component: component,
+                component_bytes: wasm_bytes,
                 limits: limits.unwrap_or(default_limits),
             })
         })
