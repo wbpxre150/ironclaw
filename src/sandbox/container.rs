@@ -500,10 +500,14 @@ pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
     // DOCKER_HOST set to their runtime's socket.
-    if let Ok(docker) = Docker::connect_with_local_defaults()
-        && docker.ping().await.is_ok()
-    {
-        return Ok(docker);
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut last_err: Option<String> = None;
+    match Docker::connect_with_local_defaults() {
+        Ok(docker) => match docker.ping().await {
+            Ok(_) => return Ok(docker),
+            Err(e) => last_err = Some(e.to_string()),
+        },
+        Err(e) => last_err = Some(e.to_string()),
     }
 
     #[cfg(unix)]
@@ -515,32 +519,72 @@ pub async fn connect_docker() -> Result<Docker> {
         for sock in unix_socket_candidates() {
             if sock.exists() {
                 let sock_str = sock.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
-                {
-                    return Ok(docker);
+                match Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION) {
+                    Ok(docker) => match docker.ping().await {
+                        Ok(_) => return Ok(docker),
+                        Err(e) => last_err = Some(format!("{}: {}", sock_str, e)),
+                    },
+                    Err(e) => last_err = Some(format!("{}: {}", sock_str, e)),
                 }
             }
         }
     }
 
+    let hint = if last_err
+        .as_deref()
+        .is_some_and(|e| e.contains("Permission denied") || e.contains("permission denied"))
+    {
+        " (permission denied — add your user to the 'docker' group: sudo usermod -aG docker $USER)"
+    } else {
+        ""
+    };
+
     Err(SandboxError::DockerNotAvailable {
-        reason: "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
+        reason: format!(
+            "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
             /var/run/docker.sock, ~/.docker/run/docker.sock, \
             ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
-            $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock"
-            .to_string(),
+            $XDG_RUNTIME_DIR/docker.sock, /run/user/<uid>/docker.sock{hint}{}",
+            last_err
+                .map(|e| format!(" Last error: {e}"))
+                .unwrap_or_default()
+        ),
     })
 }
 
 #[cfg(unix)]
 fn unix_socket_candidates() -> Vec<PathBuf> {
+    // Use the real process UID rather than $UID — $UID is a shell builtin that is
+    // not exported to child processes, so std::env::var("UID") returns Err on most
+    // Linux systems and the rootless Docker socket path (/run/user/<uid>/docker.sock)
+    // would never be tried.
+    let uid = process_uid();
     unix_socket_candidates_from_env(
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
-        std::env::var("UID").ok(),
+        uid,
     )
+}
+
+/// Returns the effective UID of the current process as a string.
+///
+/// Reads from `/proc/self/status` on Linux. Falls back to the `$UID` env var
+/// (which only works in shells that export it) and then to `None`.
+#[cfg(unix)]
+fn process_uid() -> Option<String> {
+    // /proc/self/status is Linux-specific but covers our primary target.
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            // "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                if let Some(uid) = rest.split_whitespace().next() {
+                    return Some(uid.to_string());
+                }
+            }
+        }
+    }
+    // Fallback: $UID may be set in shells that export it, or via sudo.
+    std::env::var("UID").ok().filter(|v| !v.is_empty())
 }
 
 #[cfg(unix)]
@@ -590,6 +634,15 @@ mod tests {
         assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_uid_is_numeric() {
+        // process_uid() must return a non-empty numeric string on any Unix system.
+        let uid = process_uid().expect("process_uid() returned None on a Unix system");
+        assert!(!uid.is_empty());
+        assert!(uid.parse::<u32>().is_ok(), "UID '{uid}' is not a u32");
     }
 
     #[tokio::test]
