@@ -1,0 +1,31 @@
+{
+  "name": "brave-search",
+  "display_name": "Brave Search",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Privacy-respecting web and news search via the Brave Search API",
+  "keywords": ["search", "web", "news", "brave", "privacy"],
+
+  "source": {
+    "dir": "tools-src/brave-search",
+    "capabilities": "brave-search-tool.capabilities.json",
+    "crate_name": "brave-search-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/brave-search-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Brave",
+    "secrets": ["brave_search_api_key"],
+    "shared_auth": null,
+    "setup_url": "https://brave.com/search/api/"
+  },
+
+  "tags": ["search"]
+}
