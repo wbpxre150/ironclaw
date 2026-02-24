@@ -1638,8 +1638,7 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
-            .with_secrets_store(Arc::clone(&self.secrets));
+        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
