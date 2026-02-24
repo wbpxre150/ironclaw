@@ -500,8 +500,7 @@ pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
     // DOCKER_HOST set to their runtime's socket.
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut last_err: Option<String> = None;
+    let mut last_err: Option<String>;
     match Docker::connect_with_local_defaults() {
         Ok(docker) => match docker.ping().await {
             Ok(_) => return Ok(docker),
