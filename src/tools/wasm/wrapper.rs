@@ -977,7 +977,20 @@ async fn resolve_host_credentials(
             },
             // Expired error from store means we definitely need to refresh
             Err(crate::secrets::SecretError::Expired) => true,
-            // Not found or other errors: skip refresh, let the normal flow handle it
+            // Not found or other errors: try "default" user_id
+            Err(_) if user_id != "default" => {
+                match store.get("default", &config.secret_name).await {
+                    Ok(secret) => match secret.expires_at {
+                        Some(expires_at) => {
+                            let buffer = chrono::Duration::minutes(5);
+                            expires_at - buffer < chrono::Utc::now()
+                        }
+                        None => false,
+                    },
+                    Err(crate::secrets::SecretError::Expired) => true,
+                    Err(_) => false,
+                }
+            }
             Err(_) => false,
         };
 
@@ -986,7 +999,10 @@ async fn resolve_host_credentials(
                 secret_name = %config.secret_name,
                 "Access token expired or near expiry, attempting refresh"
             );
-            refresh_oauth_token(store, user_id, config).await;
+            // Try refresh with original user_id first, fall back to "default"
+            if !refresh_oauth_token(store, user_id, config).await && user_id != "default" {
+                refresh_oauth_token(store, "default", config).await;
+            }
         }
     }
 
@@ -1010,12 +1026,37 @@ async fn resolve_host_credentials(
             continue;
         }
 
+        // Try the channel's user_id first, then fall back to "default".
+        // Secrets are typically stored under "default" (via web UI / setup wizard)
+        // but channel-specific user IDs (e.g., Telegram numeric IDs) won't match.
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
             Ok(s) => s,
+            Err(_) if user_id != "default" => {
+                match store.get_decrypted("default", &mapping.secret_name).await {
+                    Ok(s) => {
+                        tracing::debug!(
+                            secret_name = %mapping.secret_name,
+                            original_user_id = %user_id,
+                            "Resolved credential via fallback user_id \"default\""
+                        );
+                        s
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            secret_name = %mapping.secret_name,
+                            error = %e,
+                            user_id = %user_id,
+                            "Could not resolve credential for WASM tool (auth may not be configured)"
+                        );
+                        continue;
+                    }
+                }
+            }
             Err(e) => {
                 tracing::debug!(
                     secret_name = %mapping.secret_name,
                     error = %e,
+                    user_id = %user_id,
                     "Could not resolve credential for WASM tool (auth may not be configured)"
                 );
                 continue;
