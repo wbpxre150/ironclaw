@@ -68,10 +68,7 @@ impl SidecarConfig {
             ports: vec![(port.to_string(), "3000".to_string())],
             env,
             volumes: Vec::new(),
-            health_check: HealthCheck::Http {
-                path: "/".to_string(),
-                port: 3000,
-            },
+            health_check: HealthCheck::Tcp { port: 3000 },
             startup_timeout: Duration::from_secs(90),
             ..Default::default()
         }

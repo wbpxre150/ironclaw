@@ -406,8 +406,9 @@ impl SidecarManager {
         match response {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(e) => {
-                // Connection refused is expected during startup
-                if e.is_connect() {
+                // Connection refused and request timeout are both expected during startup —
+                // the container port is open but the service hasn't finished initializing.
+                if e.is_connect() || e.is_timeout() {
                     Ok(false)
                 } else {
                     Err(SidecarError::Http(e.to_string()))

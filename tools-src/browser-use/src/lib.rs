@@ -63,6 +63,14 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
                     "maximum": MAX_ACTION_TIMEOUT_MS,
                     "description": "Optional per-action timeout override in milliseconds."
                 },
+                "url": {
+                    "type": "string",
+                    "description": "URL to navigate to. Required for the 'open' action. Must start with http:// or https://."
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Value to fill, type, or select. Required for 'fill', 'type', and 'select' actions."
+                },
                 "backend_url": {
                     "type": "string",
                     "description": "Optional Browserless sidecar endpoint override. Must target localhost."

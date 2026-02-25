@@ -20,15 +20,49 @@ use crate::tools::builtin::{
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
     MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ToolInstallTool, ToolListTool, ToolReloadTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
-    WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
+    WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper, WorkspaceReader,
+    WorkspaceWriter,
 };
 use crate::workspace::Workspace;
+
+/// Adapts `Arc<Workspace>` into the sync `WorkspaceReader` trait.
+struct WorkspaceReaderAdapter(Arc<Workspace>);
+
+impl WorkspaceReader for WorkspaceReaderAdapter {
+    fn read(&self, path: &str) -> Option<String> {
+        let ws = Arc::clone(&self.0);
+        let path = path.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { ws.read(&path).await.ok().map(|doc| doc.content) })
+        })
+    }
+}
+
+/// Adapts `Arc<Workspace>` into the sync `WorkspaceWriter` trait.
+struct WorkspaceWriterAdapter(Arc<Workspace>);
+
+impl WorkspaceWriter for WorkspaceWriterAdapter {
+    fn write(&self, path: &str, content: &str) -> Result<(), String> {
+        let ws = Arc::clone(&self.0);
+        let path = path.to_string();
+        let content = content.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                ws.write(&path, &content)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        })
+    }
+}
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations.
 /// This prevents a dynamically built or installed tool from replacing a
@@ -344,8 +378,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolReloadTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
-        tracing::info!("Registered 6 extension management tools");
+        tracing::info!("Registered 7 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
@@ -479,6 +514,12 @@ impl ToolRegistry {
         if let Some(oauth) = reg.oauth_refresh {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
+        if let Some(ws) = reg.workspace {
+            wrapper = wrapper.with_workspace(
+                Arc::new(WorkspaceReaderAdapter(Arc::clone(&ws))),
+                Some(Arc::new(WorkspaceWriterAdapter(ws))),
+            );
+        }
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -549,6 +590,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             secrets_store: None,
             oauth_refresh: None,
+            workspace: None,
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -594,6 +636,11 @@ pub struct WasmToolRegistration<'a> {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Workspace for tools that declare workspace capabilities.
+    ///
+    /// When set, the workspace reader and writer are injected so WASM tools
+    /// can persist state (e.g. session data) across invocations.
+    pub workspace: Option<Arc<Workspace>>,
 }
 
 impl Default for ToolRegistry {

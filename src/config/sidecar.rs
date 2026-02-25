@@ -98,10 +98,7 @@ impl SidecarConfig {
                 env
             },
             volumes: Vec::new(),
-            health_check: crate::sidecar::HealthCheck::Http {
-                path: "/".to_string(),
-                port: 3000,
-            },
+            health_check: crate::sidecar::HealthCheck::Tcp { port: 3000 },
             startup_timeout: Duration::from_secs(self.startup_timeout_secs),
             keep_on_shutdown: self.keep_on_shutdown,
             ..Default::default()

@@ -1605,6 +1605,30 @@ impl ExtensionManager {
         })
     }
 
+    /// Reload a WASM tool by evicting its compiled module and unregistering the
+    /// old wrapper, then re-running normal activation.  This picks up an updated
+    /// `.wasm` binary and its new schema without restarting the process.
+    ///
+    /// In-flight calls that already hold an `Arc<WasmToolWrapper>` continue to
+    /// completion against the old binary; only new calls get the updated wrapper.
+    pub async fn reload_wasm_tool(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        let runtime = self.wasm_tool_runtime.as_ref().ok_or_else(|| {
+            ExtensionError::ActivationFailed("WASM runtime not available".to_string())
+        })?;
+
+        // Evict the compiled module so the next prepare() re-reads bytes from disk.
+        runtime.remove(name).await;
+
+        // Drop the old tool wrapper from the registry.
+        self.tool_registry.unregister(name).await;
+
+        tracing::info!(tool = name, "Evicted WASM tool; reloading from disk");
+
+        // Re-run normal activation — reads updated binary, calls schema()/description()
+        // afresh, and re-registers the wrapper with the updated schema.
+        self.activate_wasm_tool(name).await
+    }
+
     async fn activate_wasm_tool(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
         // Check if already active
         if self.tool_registry.has(name).await {

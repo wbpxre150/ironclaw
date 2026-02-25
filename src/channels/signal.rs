@@ -785,13 +785,37 @@ impl Channel for SignalChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        // Send typing indicator for thinking status.
-        if matches!(status, StatusUpdate::Thinking(_))
-            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
-        {
-            let target = Self::parse_recipient_target(target_str);
-            let params = self.build_rpc_params(&target, None);
-            let _ = self.rpc_request("sendTyping", params).await;
+        let target_str = metadata
+            .get("signal_target")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        match &status {
+            StatusUpdate::Thinking(_) => {
+                if let Some(t) = target_str {
+                    let target = Self::parse_recipient_target(&t);
+                    let params = self.build_rpc_params(&target, None);
+                    let _ = self.rpc_request("sendTyping", params).await;
+                }
+            }
+            StatusUpdate::ApprovalNeeded {
+                tool_name,
+                description,
+                parameters,
+                ..
+            } => {
+                if let Some(t) = target_str {
+                    let params_display = serde_json::to_string_pretty(parameters)
+                        .unwrap_or_else(|_| parameters.to_string());
+                    let msg = format!(
+                        "Tool approval required: {tool_name}\n{description}\n\nParameters:\n{params_display}\n\nReply 'yes' to approve, 'always' to approve for this session, or 'no' to deny."
+                    );
+                    let target = Self::parse_recipient_target(&t);
+                    let params = self.build_rpc_params(&target, Some(&msg));
+                    let _ = self.rpc_request("send", params).await;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

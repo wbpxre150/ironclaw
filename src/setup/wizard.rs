@@ -911,11 +911,13 @@ impl SetupWizard {
         }
 
         // Check secrets store — if a key is already saved, skip re-entry
-        if let Ok(ctx) = self.init_secrets_context().await {
-            if ctx.secret_exists(secret_name).await {
-                print_success(&format!("{display_name} API key already saved — keeping existing key"));
-                return Ok(());
-            }
+        if let Ok(ctx) = self.init_secrets_context().await
+            && ctx.secret_exists(secret_name).await
+        {
+            print_success(&format!(
+                "{display_name} API key already saved — keeping existing key"
+            ));
+            return Ok(());
         }
 
         println!();

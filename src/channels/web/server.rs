@@ -233,6 +233,10 @@ pub async fn start_server(
             post(extensions_activate_handler),
         )
         .route(
+            "/api/extensions/{name}/reload",
+            post(extensions_reload_handler),
+        )
+        .route(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
@@ -1935,6 +1939,21 @@ async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+async fn extensions_reload_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr.reload_wasm_tool(&name).await {
+        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }

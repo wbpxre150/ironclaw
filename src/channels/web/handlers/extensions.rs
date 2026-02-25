@@ -138,6 +138,21 @@ pub async fn extensions_activate_handler(
     }
 }
 
+pub async fn extensions_reload_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr.reload_wasm_tool(&name).await {
+        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
 pub async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,

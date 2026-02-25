@@ -496,6 +496,64 @@ impl Tool for ToolRemoveTool {
     }
 }
 
+// ── tool_reload ───────────────────────────────────────────────────────────
+
+pub struct ToolReloadTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ToolReloadTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolReloadTool {
+    fn name(&self) -> &str {
+        "tool_reload"
+    }
+
+    fn description(&self) -> &str {
+        "Reload a WASM tool from its binary on disk, picking up any updated code and schema. \
+         Use this after a tool's .wasm file has been rebuilt."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the WASM tool to reload"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        let result = self
+            .manager
+            .reload_wasm_tool(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let output = serde_json::to_value(&result)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

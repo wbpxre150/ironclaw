@@ -45,6 +45,7 @@ use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
 };
+use crate::workspace::Workspace;
 
 /// Error during WASM tool loading.
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +80,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    workspace: Option<Arc<Workspace>>,
 }
 
 impl WasmToolLoader {
@@ -88,12 +90,22 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            workspace: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the workspace for WASM tools that declare workspace capabilities.
+    ///
+    /// When set, tools with `workspace` in their capabilities file will have the
+    /// workspace reader and writer injected so they can persist state across calls.
+    pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
+        self.workspace = Some(workspace);
         self
     }
 
@@ -152,6 +164,7 @@ impl WasmToolLoader {
                 schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
+                workspace: self.workspace.clone(),
             })
             .await?;
 
