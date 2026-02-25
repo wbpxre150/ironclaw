@@ -1,5 +1,6 @@
 //! Per-job worker execution.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -243,6 +244,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             return self.execute_plan(rx, reasoning, reason_ctx, plan).await;
         }
 
+        // Tracks consecutive failures per tool name.  When a single tool fails
+        // this many times in a row the job is marked stuck rather than letting
+        // the LLM retry indefinitely (which can cause a 15-minute hang when a
+        // required sidecar is unreachable or the WASM tool keeps timing out).
+        const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
+        let mut consecutive_tool_failures: HashMap<String, u32> = HashMap::new();
+
         // Otherwise, use direct tool selection loop
         loop {
             // Check for stop signal
@@ -355,8 +363,26 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
                         let results = self.execute_tools_parallel(&selections).await;
                         for (selection, result) in selections.iter().zip(results) {
-                            self.process_tool_result(reason_ctx, selection, result.result)
+                            let errored = self
+                                .process_tool_result(reason_ctx, selection, result.result)
                                 .await?;
+                            if errored {
+                                let count = consecutive_tool_failures
+                                    .entry(selection.tool_name.clone())
+                                    .and_modify(|c| *c += 1)
+                                    .or_insert(1);
+                                if *count >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                                    let msg = format!(
+                                        "Tool '{}' failed {} times in a row; giving up",
+                                        selection.tool_name, count
+                                    );
+                                    tracing::warn!("Job {}: {}", self.job_id, msg);
+                                    self.mark_stuck(&msg).await?;
+                                    return Ok(());
+                                }
+                            } else {
+                                consecutive_tool_failures.remove(&selection.tool_name);
+                            }
                         }
                     }
                 }
@@ -374,8 +400,26 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .execute_tool(&selection.tool_name, &selection.parameters)
                     .await;
 
-                self.process_tool_result(reason_ctx, selection, result)
+                let errored = self
+                    .process_tool_result(reason_ctx, selection, result)
                     .await?;
+                if errored {
+                    let count = consecutive_tool_failures
+                        .entry(selection.tool_name.clone())
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    if *count >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                        let msg = format!(
+                            "Tool '{}' failed {} times in a row; giving up",
+                            selection.tool_name, count
+                        );
+                        tracing::warn!("Job {}: {}", self.job_id, msg);
+                        self.mark_stuck(&msg).await?;
+                        return Ok(());
+                    }
+                } else {
+                    consecutive_tool_failures.remove(&selection.tool_name);
+                }
             } else {
                 // Multiple tools: execute in parallel
                 tracing::debug!(
@@ -388,8 +432,26 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
                 // Process all results
                 for (selection, result) in selections.iter().zip(results) {
-                    self.process_tool_result(reason_ctx, selection, result.result)
+                    let errored = self
+                        .process_tool_result(reason_ctx, selection, result.result)
                         .await?;
+                    if errored {
+                        let count = consecutive_tool_failures
+                            .entry(selection.tool_name.clone())
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                        if *count >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                            let msg = format!(
+                                "Tool '{}' failed {} times in a row; giving up",
+                                selection.tool_name, count
+                            );
+                            tracing::warn!("Job {}: {}", self.job_id, msg);
+                            self.mark_stuck(&msg).await?;
+                            return Ok(());
+                        }
+                    } else {
+                        consecutive_tool_failures.remove(&selection.tool_name);
+                    }
                 }
             }
 
@@ -753,6 +815,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
                 // own structured response (in execution_loop) can mark a job done.
+                //
+                // Returns Ok(false) = success, Ok(true) = tool error (caller tracks failures).
                 Ok(false)
             }
             Err(e) => {
@@ -791,7 +855,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     format!("Error: {}", e),
                 ));
 
-                Ok(false)
+                // Returns Ok(true) = tool errored; caller tracks consecutive failures.
+                Ok(true)
             }
         }
     }

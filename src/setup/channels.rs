@@ -686,6 +686,21 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 pub async fn setup_http_tls(ctx: &SecretsContext) -> Result<(), ChannelSetupError> {
     println!("HTTPS/TLS Setup:");
     println!();
+
+    // Check for existing TLS configuration and offer to keep it.
+    let existing_cert = ctx.get_secret("tls_webhook_cert_path").await.ok();
+    let existing_key = ctx.get_secret("tls_webhook_key_path").await.ok();
+    if let (Some(cert), Some(key)) = (&existing_cert, &existing_key) {
+        print_info(&format!("Current certificate: {}", cert.expose_secret()));
+        print_info(&format!("Current key:         {}", key.expose_secret()));
+        println!();
+        if confirm("Keep existing TLS certificate and key?", true)? {
+            print_success("Keeping existing TLS configuration.");
+            return Ok(());
+        }
+        println!();
+    }
+
     print_info("Provide PEM-encoded certificate and private key files.");
     print_info("You can generate a self-signed cert with:");
     print_info(

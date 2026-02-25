@@ -60,7 +60,8 @@
     },
     "max_message_bytes": 1048576,
     "connect_timeout_secs": 10,
-    "read_timeout_secs": 30
+    "read_timeout_secs": 30,
+    "pooling_enabled": true
   },
   "secrets": {
     "allowed_names": []

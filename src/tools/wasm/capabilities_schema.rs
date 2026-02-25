@@ -367,6 +367,14 @@ pub struct WebSocketCapabilitySchema {
     /// Read timeout in seconds.
     #[serde(default)]
     pub read_timeout_secs: Option<u64>,
+
+    /// Enable connection pooling for persistent WebSocket sessions (e.g. CDP).
+    #[serde(default)]
+    pub pooling_enabled: bool,
+
+    /// Custom idle TTL for pooled connections, in seconds (default: 300).
+    #[serde(default)]
+    pub pool_idle_ttl_secs: Option<u64>,
 }
 
 impl WebSocketCapabilitySchema {
@@ -393,6 +401,13 @@ impl WebSocketCapabilitySchema {
         }
         if let Some(secs) = self.read_timeout_secs {
             cap.read_timeout = Duration::from_secs(secs);
+        }
+        if self.pooling_enabled {
+            cap = if let Some(ttl) = self.pool_idle_ttl_secs {
+                cap.with_pool_ttl(Duration::from_secs(ttl))
+            } else {
+                cap.with_pool()
+            };
         }
 
         cap

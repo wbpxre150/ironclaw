@@ -747,20 +747,8 @@ impl SetupWizard {
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
-                // Still run the auth sub-flow in case they need to update keys
-                match current.as_str() {
-                    "nearai" => return self.setup_nearai().await,
-                    "anthropic" => return self.setup_anthropic().await,
-                    "openai" => return self.setup_openai().await,
-                    "ollama" => return self.setup_ollama(),
-                    "openai_compatible" => return self.setup_openai_compatible().await,
-                    _ => {
-                        return Err(SetupError::Config(format!(
-                            "Unhandled provider: {}",
-                            current
-                        )));
-                    }
-                }
+                print_success(&format!("{display} provider kept"));
+                return Ok(());
             }
 
             if !is_known {
@@ -912,6 +900,14 @@ impl SetupWizard {
                 }
                 self.llm_api_key = Some(SecretString::from(existing));
                 print_success(&format!("{display_name} configured (from env)"));
+                return Ok(());
+            }
+        }
+
+        // Check secrets store — if a key is already saved, skip re-entry
+        if let Ok(ctx) = self.init_secrets_context().await {
+            if ctx.secret_exists(secret_name).await {
+                print_success(&format!("{display_name} API key already saved — keeping existing key"));
                 return Ok(());
             }
         }

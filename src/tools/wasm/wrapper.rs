@@ -109,6 +109,10 @@ struct StoreData {
     http_runtime: Option<tokio::runtime::Runtime>,
     /// WebSocket runtime for persistent connections.
     ws_runtime: Option<tokio::runtime::Runtime>,
+    /// Wall-clock deadline for this execution. Host functions (ws recv, http)
+    /// check this so that the spawn_blocking thread self-terminates when the
+    /// outer tokio timeout fires, rather than running until WASM epoch traps.
+    deadline: Option<std::time::Instant>,
 }
 
 /// WebSocket connection state for the ws-connection resource.
@@ -164,7 +168,14 @@ impl StoreData {
             host_credentials,
             http_runtime: None,
             ws_runtime: None,
+            deadline: None,
         }
+    }
+
+    /// Set the wall-clock deadline for this execution.
+    fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     /// Inject credentials into a string by replacing placeholders.
@@ -741,13 +752,33 @@ impl near::agent::host::HostWsConnection for StoreData {
         conn: Resource<near::agent::host::WsConnection>,
         timeout_ms: Option<u32>,
     ) -> Result<String, String> {
+        // Bail out immediately if the outer execution deadline has already passed.
+        // This unblocks the spawn_blocking thread so it doesn't outlive the tokio timeout.
+        if let Some(dl) = self.deadline
+            && std::time::Instant::now() >= dl
+        {
+            return Err("WebSocket receive timeout: execution deadline exceeded".to_string());
+        }
+
         let conn_state: &WsConnState = self
             .table
             .get(&conn)
             .map_err(|e| format!("Invalid WebSocket connection: {}", e))?;
 
         let mut stream = ws_stream(conn_state)?;
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+
+        // Cap per-recv timeout to remaining budget so we don't block past the deadline.
+        let remaining_ms = self.deadline.map(|dl| {
+            dl.saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+                .min(u32::MAX as u128) as u32
+        });
+        let requested_ms = timeout_ms.unwrap_or(30_000);
+        let effective_ms = match remaining_ms {
+            Some(rem) => requested_ms.min(rem).max(1),
+            None => requested_ms,
+        };
+        let timeout = Duration::from_millis(effective_ms as u64);
 
         ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
             loop {
@@ -924,18 +955,22 @@ impl WasmToolWrapper {
         params: serde_json::Value,
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
 
         // Create store with fresh state (NEAR pattern: fresh instance per call)
-        let store_data = StoreData::new(
+        let mut store_data = StoreData::new(
             limits.memory_bytes,
             self.capabilities.clone(),
             self.prepared.name.clone(),
             self.credentials.clone(),
             host_credentials,
         );
+        if let Some(dl) = deadline {
+            store_data = store_data.with_deadline(dl);
+        }
         let mut store = Store::new(engine, store_data);
 
         // Configure fuel if enabled
@@ -1121,6 +1156,12 @@ impl Tool for WasmToolWrapper {
         let schema = self.schema.clone();
         let credentials = self.credentials.clone();
 
+        // Compute a wall-clock deadline so the spawn_blocking thread can self-terminate
+        // when the outer tokio timeout fires. tokio::time::timeout only cancels the
+        // await on the JoinHandle; the blocking thread keeps running unless it checks
+        // this deadline itself (epoch interruption doesn't fire inside host functions).
+        let deadline = std::time::Instant::now() + timeout;
+
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
             let wrapper = WasmToolWrapper {
@@ -1135,7 +1176,7 @@ impl Tool for WasmToolWrapper {
             };
 
             tokio::task::spawn_blocking(move || {
-                wrapper.execute_sync(params, context_json, host_credentials)
+                wrapper.execute_sync(params, context_json, host_credentials, Some(deadline))
             })
             .await
             .map_err(|e| WasmError::ExecutionPanicked(e.to_string()))?

@@ -396,6 +396,45 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Initialize sidecar managers before the webhook server starts, so that the sidecar
+    // startup delay does not create a window where webhooks arrive before channels are ready.
+    let sidecar_managers: Vec<std::sync::Arc<SidecarManager>> = if config.sidecar.any_enabled() {
+        let mut managers = Vec::new();
+
+        if config.sidecar.browserless_enabled {
+            let manager =
+                std::sync::Arc::new(SidecarManager::new(config.sidecar.to_browserless_config()));
+            managers.push(manager);
+            tracing::info!(
+                "Browserless sidecar configured (port {})",
+                config.sidecar.browserless_port
+            );
+        }
+
+        for manager in &managers {
+            match manager.ensure_ready().await {
+                Ok(endpoint) => {
+                    tracing::info!(
+                        sidecar = %manager.config().name,
+                        endpoint = %endpoint,
+                        "Sidecar started and ready"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        sidecar = %manager.config().name,
+                        error = %e,
+                        "Failed to start sidecar"
+                    );
+                }
+            }
+        }
+
+        managers
+    } else {
+        Vec::new()
+    };
+
     // Start the unified webhook server if any routes were registered.
     let mut webhook_server = if !webhook_routes.is_empty() {
         let addr =
@@ -546,44 +585,6 @@ async fn main() -> anyhow::Result<()> {
         .cheap_llm
         .as_ref()
         .map(|c| c.model_name().to_string());
-
-    // Initialize sidecar managers for external services (e.g., browserless)
-    let sidecar_managers: Vec<std::sync::Arc<SidecarManager>> = if config.sidecar.any_enabled() {
-        let mut managers = Vec::new();
-
-        if config.sidecar.browserless_enabled {
-            let manager =
-                std::sync::Arc::new(SidecarManager::new(config.sidecar.to_browserless_config()));
-            managers.push(manager);
-            tracing::info!(
-                "Browserless sidecar configured (port {})",
-                config.sidecar.browserless_port
-            );
-        }
-
-        for manager in &managers {
-            match manager.ensure_ready().await {
-                Ok(endpoint) => {
-                    tracing::info!(
-                        sidecar = %manager.config().name,
-                        endpoint = %endpoint,
-                        "Sidecar started and ready"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        sidecar = %manager.config().name,
-                        error = %e,
-                        "Failed to start sidecar"
-                    );
-                }
-            }
-        }
-
-        managers
-    } else {
-        Vec::new()
-    };
 
     let channels = Arc::new(channels);
 

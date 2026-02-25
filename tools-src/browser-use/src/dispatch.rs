@@ -23,21 +23,32 @@ pub fn dispatch_with_retries(
     let mut attempts = 0;
     let mut last_retryable: Option<StructuredError> = None;
 
+    eprintln!("[browser-use] dispatch action={action} backend={backend_url}");
+
     while attempts < MAX_ATTEMPTS {
         attempts += 1;
 
         match dispatch_page_action(action, params_obj, backend_url) {
             Ok(mut success) => {
                 success.attempts = attempts;
+                eprintln!("[browser-use] action={action} succeeded on attempt {attempts}");
                 return Ok(success);
             }
             Err(failure)
                 if error::retryable_for_code(failure.error.code) && attempts < MAX_ATTEMPTS =>
             {
+                eprintln!(
+                    "[browser-use] action={action} attempt {attempts} retryable error: code={} msg={}",
+                    failure.error.code, failure.error.message
+                );
                 last_retryable = Some(failure.error);
             }
             Err(failure) if error::retryable_for_code(failure.error.code) => {
                 let base = last_retryable.unwrap_or(failure.error);
+                eprintln!(
+                    "[browser-use] action={action} retries exhausted after {attempts} attempts: code={} msg={}",
+                    base.code, base.message
+                );
                 let exhausted = StructuredError::new(
                     ERR_RETRY_EXHAUSTED,
                     format!("Retries exhausted after {attempts} attempts"),
@@ -57,6 +68,10 @@ pub fn dispatch_with_retries(
                 });
             }
             Err(mut failure) => {
+                eprintln!(
+                    "[browser-use] action={action} attempt {attempts} non-retryable error: code={} msg={}",
+                    failure.error.code, failure.error.message
+                );
                 failure.attempts = attempts;
                 return Err(failure);
             }

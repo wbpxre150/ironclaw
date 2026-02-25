@@ -160,24 +160,9 @@ impl ExtensionManifest {
             crate_name: Some(self.source.crate_name.clone()),
         };
 
-        // Prefer pre-built artifact download when a URL is available,
-        // with build-from-source as fallback in case the download fails (e.g., 404).
-        let (source, fallback_source) = if let Some(artifact) = self.artifacts.get("wasm32-wasip2")
-        {
-            if let Some(ref url) = artifact.url {
-                (
-                    ExtensionSource::WasmDownload {
-                        wasm_url: url.clone(),
-                        capabilities_url: artifact.capabilities_url.clone(),
-                    },
-                    Some(Box::new(buildable)),
-                )
-            } else {
-                (buildable, None)
-            }
-        } else {
-            (buildable, None)
-        };
+        // Always build from local tools-src/; artifact URLs are ignored at install time.
+        let source = buildable;
+        let fallback_source: Option<Box<ExtensionSource>> = None;
 
         let auth_hint = match self.auth_summary.as_ref().and_then(|a| a.method.as_deref()) {
             Some("oauth") => AuthHint::CapabilitiesAuth,
@@ -298,9 +283,9 @@ mod tests {
     }
 
     /// When a manifest has a download URL in artifacts, to_registry_entry()
-    /// should set WasmDownload as primary source and WasmBuildable as fallback.
+    /// should still use WasmBuildable as primary source (URLs are ignored at install time).
     #[test]
-    fn test_manifest_with_download_url_has_buildable_fallback() {
+    fn test_manifest_with_download_url_still_builds_from_source() {
         let json = r#"{
             "name": "gmail",
             "display_name": "Gmail",
@@ -325,19 +310,8 @@ mod tests {
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
         let entry = manifest.to_registry_entry();
 
-        // Primary source should be WasmDownload
-        assert!(
-            matches!(&entry.source, ExtensionSource::WasmDownload { .. }),
-            "Primary source should be WasmDownload, got {:?}",
-            entry.source
-        );
-
-        // Fallback should be WasmBuildable with the source dir info
-        let fallback = entry
-            .fallback_source
-            .as_ref()
-            .expect("Should have fallback_source when download URL is set");
-        match fallback.as_ref() {
+        // Primary source must always be WasmBuildable, even when a URL is present.
+        match &entry.source {
             ExtensionSource::WasmBuildable {
                 build_dir,
                 crate_name,
@@ -346,8 +320,14 @@ mod tests {
                 assert_eq!(build_dir.as_deref(), Some("tools-src/gmail"));
                 assert_eq!(crate_name.as_deref(), Some("gmail-tool"));
             }
-            other => panic!("Fallback should be WasmBuildable, got {:?}", other),
+            other => panic!("Primary source should be WasmBuildable, got {:?}", other),
         }
+
+        // No fallback — build is the only path.
+        assert!(
+            entry.fallback_source.is_none(),
+            "Should have no fallback_source when always building from source"
+        );
     }
 
     /// When a manifest has null URL in artifacts, the primary source should be

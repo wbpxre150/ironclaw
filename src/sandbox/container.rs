@@ -575,10 +575,10 @@ fn process_uid() -> Option<String> {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
             // "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid) = rest.split_whitespace().next() {
-                    return Some(uid.to_string());
-                }
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid) = rest.split_whitespace().next()
+            {
+                return Some(uid.to_string());
             }
         }
     }
