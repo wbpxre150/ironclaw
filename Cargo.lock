@@ -2880,6 +2880,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "libsql",
+ "lru",
  "mime_guess",
  "open",
  "pgvector",
