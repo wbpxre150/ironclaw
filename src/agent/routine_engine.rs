@@ -605,6 +605,7 @@ async fn send_notification(
             "routine_name": routine_name,
             "status": status.to_string(),
         }),
+        attachments: Vec::new(),
     };
 
     if let Err(e) = tx.send(response).await {

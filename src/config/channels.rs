@@ -91,6 +91,21 @@ pub struct SignalConfig {
     pub ignore_attachments: bool,
     /// Skip story messages.
     pub ignore_stories: bool,
+    /// Use the signal-cli-rest-api `/v2/send` endpoint for outbound messages.
+    ///
+    /// When `true`, all sends (text and attachments) are routed through the
+    /// [bbernhard signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)
+    /// REST endpoint at `{http_url}/v2/send`, which supports base64-encoded
+    /// attachments.  This is required for sending images/files because the
+    /// native signal-cli JSON-RPC daemon only accepts local file paths — paths
+    /// that are inaccessible when IronClaw and signal-cli run in separate
+    /// containers or processes.
+    ///
+    /// When `false` (default), the native JSON-RPC endpoint is used; attachments
+    /// in `OutgoingResponse` are dropped with a warning.
+    ///
+    /// Set `SIGNAL_SEND_VIA_REST=true` to enable.
+    pub send_via_rest: bool,
 }
 
 impl ChannelsConfig {
@@ -174,6 +189,9 @@ impl ChannelsConfig {
                 ignore_stories: optional_env("SIGNAL_IGNORE_STORIES")?
                     .map(|s| s.to_lowercase() == "true" || s == "1")
                     .unwrap_or(true),
+                send_via_rest: optional_env("SIGNAL_SEND_VIA_REST")?
+                    .map(|s| s.to_lowercase() == "true" || s == "1")
+                    .unwrap_or(false),
             })
         } else {
             None

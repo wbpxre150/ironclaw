@@ -297,6 +297,7 @@ impl HeartbeatRunner {
             metadata: serde_json::json!({
                 "source": "heartbeat",
             }),
+            attachments: Vec::new(),
         };
 
         if let Err(e) = tx.send(response).await {

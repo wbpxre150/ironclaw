@@ -488,6 +488,7 @@ impl SignalChannel {
         &self,
         target: &RecipientTarget,
         message: Option<&str>,
+        attachments: &[String],
     ) -> serde_json::Value {
         match target {
             RecipientTarget::Direct(id) => {
@@ -497,6 +498,14 @@ impl SignalChannel {
                 });
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
+                }
+                if !attachments.is_empty() {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|p| serde_json::Value::String(p.clone()))
+                            .collect(),
+                    );
                 }
                 params
             }
@@ -508,12 +517,20 @@ impl SignalChannel {
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
                 }
+                if !attachments.is_empty() {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|p| serde_json::Value::String(p.clone()))
+                            .collect(),
+                    );
+                }
                 params
             }
         }
     }
 
-    /// Build JSON-RPC params for a send/typing call (static version).
+    /// Build JSON-RPC params for a send/typing call (static version, no attachments).
     fn build_rpc_params_static(
         _http_url: &str,
         account: &str,
@@ -542,6 +559,85 @@ impl SignalChannel {
                 params
             }
         }
+    }
+
+    /// Send a message via the signal-cli-rest-api `/v2/send` REST endpoint.
+    ///
+    /// Reads each file path in `attachments` from disk, base64-encodes the
+    /// content, and bundles everything into a single HTTP POST with
+    /// `base64_attachments`.  This is the only way to send attachments when
+    /// IronClaw and signal-cli run in separate containers, because the native
+    /// JSON-RPC `send` method only accepts paths accessible by the signal-cli
+    /// process itself.
+    ///
+    /// Enable this path by setting `SIGNAL_SEND_VIA_REST=true`.
+    async fn rest_send(
+        &self,
+        target: &RecipientTarget,
+        message: &str,
+        attachments: &[String],
+    ) -> Result<(), ChannelError> {
+        use base64::Engine as _;
+
+        let url = format!("{}/v2/send", self.config.http_url);
+
+        // Read and base64-encode each attachment, prepending a data-URI prefix
+        // so signal-cli-rest-api can infer the MIME type.
+        let mut b64_attachments: Vec<String> = Vec::with_capacity(attachments.len());
+        for path in attachments {
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: "signal".to_string(),
+                    reason: format!("Failed to read attachment '{path}': {e}"),
+                })?;
+            let mime = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            b64_attachments.push(format!("data:{mime};base64,{encoded}"));
+        }
+
+        let body = match target {
+            RecipientTarget::Direct(id) => serde_json::json!({
+                "number":              &self.config.account,
+                "recipients":          [id],
+                "message":             message,
+                "base64_attachments":  b64_attachments,
+            }),
+            RecipientTarget::Group(group_id) => serde_json::json!({
+                "number":              &self.config.account,
+                "recipients":          [group_id],
+                "message":             message,
+                "base64_attachments":  b64_attachments,
+            }),
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(Duration::from_secs(60))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!("REST send to {} failed: {e}", Self::redact_url(&url)),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let truncated_len = bytes.len().min(MAX_ERROR_LOG_BODY);
+            let body_str = String::from_utf8_lossy(&bytes[..truncated_len]);
+            return Err(ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!("REST send HTTP {}: {}", status.as_u16(), body_str),
+            });
+        }
+
+        Ok(())
     }
 
     /// Process a single SSE envelope, returning an `IncomingMessage` if valid.
@@ -771,8 +867,20 @@ impl Channel for SignalChannel {
         .unwrap_or_else(|| msg.user_id.clone());
 
         let target = Self::parse_recipient_target(&target_str);
-        let params = self.build_rpc_params(&target, Some(&response.content));
-        self.rpc_request("send", params).await?;
+
+        if self.config.send_via_rest {
+            self.rest_send(&target, &response.content, &response.attachments)
+                .await?;
+        } else {
+            if !response.attachments.is_empty() {
+                tracing::warn!(
+                    count = response.attachments.len(),
+                    "Signal: attachments dropped — set SIGNAL_SEND_VIA_REST=true to send images"
+                );
+            }
+            let params = self.build_rpc_params(&target, Some(&response.content), &[]);
+            self.rpc_request("send", params).await?;
+        }
 
         // Clean up stored target.
         self.reply_targets.write().await.pop(&msg.id);
@@ -794,7 +902,7 @@ impl Channel for SignalChannel {
             StatusUpdate::Thinking(_) => {
                 if let Some(t) = target_str {
                     let target = Self::parse_recipient_target(&t);
-                    let params = self.build_rpc_params(&target, None);
+                    let params = self.build_rpc_params(&target, None, &[]);
                     let _ = self.rpc_request("sendTyping", params).await;
                 }
             }
@@ -811,7 +919,7 @@ impl Channel for SignalChannel {
                         "Tool approval required: {tool_name}\n{description}\n\nParameters:\n{params_display}\n\nReply 'yes' to approve, 'always' to approve for this session, or 'no' to deny."
                     );
                     let target = Self::parse_recipient_target(&t);
-                    let params = self.build_rpc_params(&target, Some(&msg));
+                    let params = self.build_rpc_params(&target, Some(&msg), &[]);
                     let _ = self.rpc_request("send", params).await;
                 }
             }
@@ -826,8 +934,21 @@ impl Channel for SignalChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let target = Self::parse_recipient_target(user_id);
-        let params = self.build_rpc_params(&target, Some(&response.content));
-        self.rpc_request("send", params).await?;
+
+        if self.config.send_via_rest {
+            self.rest_send(&target, &response.content, &response.attachments)
+                .await?;
+        } else {
+            if !response.attachments.is_empty() {
+                tracing::warn!(
+                    count = response.attachments.len(),
+                    "Signal: attachments dropped — set SIGNAL_SEND_VIA_REST=true to send images"
+                );
+            }
+            let params = self.build_rpc_params(&target, Some(&response.content), &[]);
+            self.rpc_request("send", params).await?;
+        }
+
         Ok(())
     }
 
@@ -1093,6 +1214,7 @@ mod tests {
             group_allow_from: vec![],
             ignore_attachments: false,
             ignore_stories: false,
+            send_via_rest: false,
         }
     }
 
@@ -1108,6 +1230,7 @@ mod tests {
             group_allow_from: vec![],
             ignore_attachments: true,
             ignore_stories: true,
+            send_via_rest: false,
         }
     }
 
@@ -1716,7 +1839,7 @@ mod tests {
     fn build_rpc_params_direct_with_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
-        let params = ch.build_rpc_params(&target, Some("Hello!"));
+        let params = ch.build_rpc_params(&target, Some("Hello!"), &[]);
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
         assert_eq!(params["account"], "+1234567890");
         assert_eq!(params["message"], "Hello!");
@@ -1729,7 +1852,7 @@ mod tests {
     fn build_rpc_params_direct_without_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
-        let params = ch.build_rpc_params(&target, None);
+        let params = ch.build_rpc_params(&target, None, &[]);
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
         assert_eq!(params["account"], "+1234567890");
         // No message key should be present for typing indicators.
@@ -1741,7 +1864,7 @@ mod tests {
     fn build_rpc_params_group_with_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
-        let params = ch.build_rpc_params(&target, Some("Group msg"));
+        let params = ch.build_rpc_params(&target, Some("Group msg"), &[]);
         assert_eq!(params["groupId"], "abc123");
         assert_eq!(params["account"], "+1234567890");
         assert_eq!(params["message"], "Group msg");
@@ -1754,7 +1877,7 @@ mod tests {
     fn build_rpc_params_group_without_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
-        let params = ch.build_rpc_params(&target, None);
+        let params = ch.build_rpc_params(&target, None, &[]);
         assert_eq!(params["groupId"], "abc123");
         assert_eq!(params["account"], "+1234567890");
         assert!(params.get("message").is_none());
@@ -1766,7 +1889,7 @@ mod tests {
         let ch = make_channel()?;
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let target = RecipientTarget::Direct(uuid.to_string());
-        let params = ch.build_rpc_params(&target, Some("hi"));
+        let params = ch.build_rpc_params(&target, Some("hi"), &[]);
         assert_eq!(params["recipient"], serde_json::json!([uuid]));
         Ok(())
     }

@@ -80,6 +80,12 @@ pub struct OutgoingResponse {
     pub thread_id: Option<String>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
+    /// Optional file attachments (local file paths) to send with the message.
+    ///
+    /// Channel implementations that support attachments (e.g. Signal) will
+    /// include these files alongside the text content.  Channels that do not
+    /// support attachments silently ignore this field.
+    pub attachments: Vec<String>,
 }
 
 impl OutgoingResponse {
@@ -89,12 +95,19 @@ impl OutgoingResponse {
             content: content.into(),
             thread_id: None,
             metadata: serde_json::Value::Null,
+            attachments: Vec::new(),
         }
     }
 
     /// Set the thread ID for the response.
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Attach one or more local file paths to the response.
+    pub fn with_attachments(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.attachments.extend(paths.into_iter().map(Into::into));
         self
     }
 }
