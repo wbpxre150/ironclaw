@@ -1211,6 +1211,7 @@ mod tests {
             ignore_attachments: false,
             ignore_stories: false,
             send_via_rest: false,
+            attachments_dir: std::path::PathBuf::from("/tmp/ironclaw_test_attachments"),
         }
     }
 
@@ -1227,6 +1228,7 @@ mod tests {
             ignore_attachments: true,
             ignore_stories: true,
             send_via_rest: false,
+            attachments_dir: std::path::PathBuf::from("/tmp/ironclaw_test_attachments"),
         }
     }
 

@@ -734,6 +734,16 @@ Example:
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
 - Prefer threaded replies when responding to older messages."
             }
+            "signal" => {
+                "\
+- Signal supports plain text only; no markdown formatting is rendered.\n\
+- To send an image or file via Signal, use the `write_attachment` tool (not `write_file`). \
+  It writes to a shared folder that Signal can always read.\n\
+  Example: write_attachment(path=\"screenshot.png\", content=\"...\", encoding=\"base64\")\n\
+- The file will be automatically delivered as a Signal attachment.\n\
+- Supported formats: PNG, JPEG, GIF, PDF, and other common file types.\n\
+- Keep text concise; long messages are harder to read on mobile."
+            }
             _ => return String::new(),
         };
         format!("\n\n## Channel Formatting ({})\n{}", channel, hints)

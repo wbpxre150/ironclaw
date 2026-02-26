@@ -331,6 +331,11 @@ impl AppBuilder {
         };
         tools.register_builtin_tools();
 
+        // Register write_attachment tool when Signal is configured
+        if let Some(ref signal_cfg) = self.config.channels.signal {
+            tools.register_signal_attachment_tool(signal_cfg.attachments_dir.clone());
+        }
+
         // Create embeddings provider using the unified method
         let embeddings = self
             .config

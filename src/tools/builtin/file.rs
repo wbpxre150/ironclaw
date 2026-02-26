@@ -278,9 +278,25 @@ impl Tool for ReadFileTool {
 }
 
 /// Write file contents tool.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WriteFileTool {
     base_dir: Option<PathBuf>,
+    name: String,
+    description: String,
+}
+
+impl Default for WriteFileTool {
+    fn default() -> Self {
+        Self {
+            base_dir: None,
+            name: "write_file".to_string(),
+            description: "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
+                 (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
+                 Parent directories are created automatically. Use apply_patch for targeted edits. \
+                 When encoding='base64' is used, the written file is automatically sent as an attachment \
+                 on channels that support it (e.g. Signal, Telegram).".to_string(),
+        }
+    }
 }
 
 impl WriteFileTool {
@@ -292,18 +308,26 @@ impl WriteFileTool {
         self.base_dir = Some(dir);
         self
     }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = desc.into();
+        self
+    }
 }
 
 #[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
-        "write_file"
+        &self.name
     }
 
     fn description(&self) -> &str {
-        "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
-         (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
-         Parent directories are created automatically. Use apply_patch for targeted edits."
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -324,6 +348,8 @@ impl Tool for WriteFileTool {
                     "description": "Content encoding. Use 'base64' when writing binary files such as \
                                     screenshots (PNG/JPEG) received from the browser tool. \
                                     The content will be decoded from base64 before writing. \
+                                    Files written with base64 encoding are also propagated as channel \
+                                    attachments (e.g. automatically sent as images in Signal). \
                                     Default: 'text'."
                 }
             },

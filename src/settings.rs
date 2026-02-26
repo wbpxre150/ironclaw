@@ -251,6 +251,11 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_group_allow_from: Option<String>,
 
+    /// Directory where the agent writes attachment files for Signal delivery.
+    /// Defaults to ~/.ironclaw/attachments/. Configure with SIGNAL_ATTACHMENTS_DIR.
+    #[serde(default)]
+    pub signal_attachments_dir: Option<String>,
+
     /// Telegram owner user ID. When set, the bot only responds to this user.
     /// Captured during setup by having the user message the bot.
     #[serde(default)]

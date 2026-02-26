@@ -31,36 +31,123 @@ use crate::tools::wasm::{
 };
 use crate::workspace::Workspace;
 
+/// A dedicated bridge thread that owns a single-threaded tokio runtime for
+/// executing async workspace I/O from sync WASM host callbacks.
+///
+/// We cannot create a tokio runtime inside an async context (it panics on drop),
+/// and we cannot use `Handle::block_on` from `spawn_blocking` (deadlock risk).
+/// Instead, a dedicated OS thread runs its own runtime and processes requests
+/// via channels.
+struct WorkspaceBridge {
+    sender: std::sync::mpsc::SyncSender<BridgeRequest>,
+}
+
+enum BridgeRequest {
+    Read {
+        workspace: Arc<Workspace>,
+        path: String,
+        reply: std::sync::mpsc::SyncSender<Option<String>>,
+    },
+    Write {
+        workspace: Arc<Workspace>,
+        path: String,
+        content: String,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+}
+
+impl WorkspaceBridge {
+    fn new() -> Arc<Self> {
+        // Bounded channel so senders block if the bridge is busy (backpressure).
+        let (tx, rx) = std::sync::mpsc::sync_channel::<BridgeRequest>(16);
+        std::thread::Builder::new()
+            .name("workspace-bridge".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create workspace bridge runtime");
+                rt.block_on(async {
+                    while let Ok(req) = rx.recv() {
+                        match req {
+                            BridgeRequest::Read {
+                                workspace,
+                                path,
+                                reply,
+                            } => {
+                                let result =
+                                    workspace.read(&path).await.ok().map(|doc| doc.content);
+                                let _ = reply.send(result);
+                            }
+                            BridgeRequest::Write {
+                                workspace,
+                                path,
+                                content,
+                                reply,
+                            } => {
+                                let result = workspace
+                                    .write(&path, &content)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|e| e.to_string());
+                                let _ = reply.send(result);
+                            }
+                        }
+                    }
+                });
+            })
+            .expect("failed to spawn workspace bridge thread");
+        Arc::new(Self { sender: tx })
+    }
+}
+
 /// Adapts `Arc<Workspace>` into the sync `WorkspaceReader` trait.
-struct WorkspaceReaderAdapter(Arc<Workspace>);
+///
+/// Dispatches async workspace reads to a dedicated bridge thread, avoiding
+/// deadlocks when called from `spawn_blocking` (where `Handle::block_on` can
+/// starve) and panics (where `block_in_place` fails on blocking-pool threads).
+struct WorkspaceReaderAdapter {
+    workspace: Arc<Workspace>,
+    bridge: Arc<WorkspaceBridge>,
+}
 
 impl WorkspaceReader for WorkspaceReaderAdapter {
     fn read(&self, path: &str) -> Option<String> {
-        let ws = Arc::clone(&self.0);
-        let path = path.to_string();
-        // Called from within spawn_blocking: use Handle::block_on directly.
-        // block_in_place must not be used here — it requires a tokio worker thread,
-        // not a blocking-pool thread.
-        tokio::runtime::Handle::current()
-            .block_on(async move { ws.read(&path).await.ok().map(|doc| doc.content) })
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let req = BridgeRequest::Read {
+            workspace: Arc::clone(&self.workspace),
+            path: path.to_string(),
+            reply: tx,
+        };
+        if self.bridge.sender.send(req).is_err() {
+            return None;
+        }
+        rx.recv().ok().flatten()
     }
 }
 
 /// Adapts `Arc<Workspace>` into the sync `WorkspaceWriter` trait.
-struct WorkspaceWriterAdapter(Arc<Workspace>);
+///
+/// See `WorkspaceReaderAdapter` for rationale.
+struct WorkspaceWriterAdapter {
+    workspace: Arc<Workspace>,
+    bridge: Arc<WorkspaceBridge>,
+}
 
 impl WorkspaceWriter for WorkspaceWriterAdapter {
     fn write(&self, path: &str, content: &str) -> Result<(), String> {
-        let ws = Arc::clone(&self.0);
-        let path = path.to_string();
-        let content = content.to_string();
-        // Called from within spawn_blocking: use Handle::block_on directly.
-        tokio::runtime::Handle::current().block_on(async move {
-            ws.write(&path, &content)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let req = BridgeRequest::Write {
+            workspace: Arc::clone(&self.workspace),
+            path: path.to_string(),
+            content: content.to_string(),
+            reply: tx,
+        };
+        self.bridge
+            .sender
+            .send(req)
+            .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
     }
 }
 
@@ -114,6 +201,8 @@ pub struct ToolRegistry {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Bridge thread for sync->async workspace I/O from WASM host callbacks.
+    workspace_bridge: std::sync::OnceLock<Arc<WorkspaceBridge>>,
 }
 
 impl ToolRegistry {
@@ -125,7 +214,13 @@ impl ToolRegistry {
             credential_registry: None,
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
+            workspace_bridge: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Get or lazily create the shared workspace bridge.
+    fn workspace_bridge(&self) -> Arc<WorkspaceBridge> {
+        Arc::clone(self.workspace_bridge.get_or_init(WorkspaceBridge::new))
     }
 
     /// Create a registry with credential injection support.
@@ -282,6 +377,34 @@ impl ToolRegistry {
                 parameters: tool.parameters_schema(),
             })
             .collect()
+    }
+
+    /// Register the `write_attachment` tool scoped to the Signal attachments directory.
+    ///
+    /// When Signal is configured, call this with the configured `attachments_dir` so
+    /// the LLM has a safe, predictable place to write files that Signal can always read.
+    /// The directory is created if it does not exist.
+    pub fn register_signal_attachment_tool(&self, dir: std::path::PathBuf) {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %e,
+                "Failed to create Signal attachments directory"
+            );
+        }
+        self.register_sync(Arc::new(
+            WriteFileTool::new()
+                .with_name("write_attachment")
+                .with_description(
+                    "Write a file to the Signal attachments folder. \
+                     Use this (not write_file) when you want to send an image or file via Signal. \
+                     Accepts encoding='base64' for binary content such as screenshots. \
+                     The file will be automatically delivered as a Signal attachment. \
+                     Supported formats: PNG, JPEG, GIF, PDF, and other common file types.",
+                )
+                .with_base_dir(dir),
+        ));
+        tracing::info!("Registered write_attachment tool for Signal");
     }
 
     /// Register development tools for building software.
@@ -515,9 +638,16 @@ impl ToolRegistry {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
         if let Some(ws) = reg.workspace {
+            let bridge = self.workspace_bridge();
             wrapper = wrapper.with_workspace(
-                Arc::new(WorkspaceReaderAdapter(Arc::clone(&ws))),
-                Some(Arc::new(WorkspaceWriterAdapter(ws))),
+                Arc::new(WorkspaceReaderAdapter {
+                    workspace: Arc::clone(&ws),
+                    bridge: Arc::clone(&bridge),
+                }),
+                Some(Arc::new(WorkspaceWriterAdapter {
+                    workspace: ws,
+                    bridge,
+                })),
             );
         }
 

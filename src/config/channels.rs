@@ -106,6 +106,12 @@ pub struct SignalConfig {
     ///
     /// Set `SIGNAL_SEND_VIA_REST=true` to enable.
     pub send_via_rest: bool,
+    /// Directory where the agent writes attachment files for Signal delivery.
+    ///
+    /// The `write_attachment` tool constrains writes to this directory so that
+    /// files are always in a location Signal (or the REST API) can reach.
+    /// Defaults to `~/.ironclaw/attachments/`. Configure with `SIGNAL_ATTACHMENTS_DIR`.
+    pub attachments_dir: PathBuf,
 }
 
 impl ChannelsConfig {
@@ -192,6 +198,21 @@ impl ChannelsConfig {
                 send_via_rest: optional_env("SIGNAL_SEND_VIA_REST")?
                     .map(|s| s.to_lowercase() == "true" || s == "1")
                     .unwrap_or(false),
+                attachments_dir: optional_env("SIGNAL_ATTACHMENTS_DIR")?
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        settings
+                            .channels
+                            .signal_attachments_dir
+                            .as_ref()
+                            .map(PathBuf::from)
+                    })
+                    .unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| PathBuf::from("."))
+                            .join(".ironclaw")
+                            .join("attachments")
+                    }),
             })
         } else {
             None

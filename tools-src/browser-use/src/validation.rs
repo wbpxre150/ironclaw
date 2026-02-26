@@ -12,11 +12,20 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
     };
 
     if let Some(timeout) = obj.get("timeout_ms") {
-        if !timeout.is_u64() {
-            return Err(StructuredError::new(
-                ERR_INVALID_PARAMS,
-                "Field 'timeout_ms' must be an integer",
-            ));
+        // Treat JSON null as absent (LLMs often emit null for optional fields).
+        if !timeout.is_null() {
+            // Accept u64 integers and floats that are whole numbers (LLMs often emit 15000.0).
+            let is_valid = timeout.is_u64()
+                || timeout
+                    .as_f64()
+                    .map(|f| f >= 0.0 && f.fract() == 0.0)
+                    .unwrap_or(false);
+            if !is_valid {
+                return Err(StructuredError::new(
+                    ERR_INVALID_PARAMS,
+                    "Field 'timeout_ms' must be an integer",
+                ));
+            }
         }
     }
 
@@ -474,7 +483,7 @@ pub fn resolve_timeout_ms(action: &str, params: &Map<String, Value>) -> u32 {
 
     params
         .get("timeout_ms")
-        .and_then(Value::as_u64)
+        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
         .map(|t| t.clamp(1, MAX_ACTION_TIMEOUT_MS as u64) as u32)
         .unwrap_or(default_ms)
 }
