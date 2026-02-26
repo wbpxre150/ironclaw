@@ -81,6 +81,7 @@ pub struct WasmToolLoader {
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     workspace: Option<Arc<Workspace>>,
+    attachment_dir: Option<std::path::PathBuf>,
 }
 
 impl WasmToolLoader {
@@ -91,6 +92,7 @@ impl WasmToolLoader {
             registry,
             secrets_store: None,
             workspace: None,
+            attachment_dir: None,
         }
     }
 
@@ -106,6 +108,16 @@ impl WasmToolLoader {
     /// workspace reader and writer injected so they can persist state across calls.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Set the attachment directory for WASM tools that call `attachment-save`.
+    ///
+    /// When set, any WASM tool can save binary data (e.g. screenshots) directly
+    /// to this directory and return only the file path to the LLM, avoiding
+    /// large base64 blobs in the prompt.
+    pub fn with_attachment_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.attachment_dir = Some(dir);
         self
     }
 
@@ -150,6 +162,13 @@ impl WasmToolLoader {
             }
         } else {
             (Capabilities::default(), None)
+        };
+
+        // Inject attachment_dir into capabilities if configured on the loader
+        let capabilities = if let Some(ref dir) = self.attachment_dir {
+            capabilities.with_attachment_dir(dir.clone())
+        } else {
+            capabilities
         };
 
         // Register the tool

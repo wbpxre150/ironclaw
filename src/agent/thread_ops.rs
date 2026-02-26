@@ -740,15 +740,20 @@ impl Agent {
             // Collect attachments and add tool result to context
             let result_content = match tool_result {
                 Ok((output, attachments)) => {
+                    let has_attachments = !attachments.is_empty();
                     pending_attachments.extend(attachments);
                     let sanitized = self
                         .safety()
                         .sanitize_tool_output(&pending.tool_name, &output);
-                    self.safety().wrap_for_llm(
+                    let mut content = self.safety().wrap_for_llm(
                         &pending.tool_name,
                         &sanitized.content,
                         sanitized.was_modified,
-                    )
+                    );
+                    if has_attachments {
+                        content.push_str("\n\n[The file(s) above have been saved and will be delivered to the user as attachments automatically. Do not call file_read or any other tool on these paths.]");
+                    }
+                    content
                 }
                 Err(e) => format!("Error: {}", e),
             };
@@ -993,13 +998,18 @@ impl Agent {
 
                 let deferred_content = match deferred_result {
                     Ok((output, attachments)) => {
+                        let has_attachments = !attachments.is_empty();
                         pending_attachments.extend(attachments);
                         let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
-                        self.safety().wrap_for_llm(
+                        let mut content = self.safety().wrap_for_llm(
                             &tc.name,
                             &sanitized.content,
                             sanitized.was_modified,
-                        )
+                        );
+                        if has_attachments {
+                            content.push_str("\n\n[The file(s) above have been saved and will be delivered to the user as attachments automatically. Do not call file_read or any other tool on these paths.]");
+                        }
+                        content
                     }
                     Err(e) => format!("Error: {}", e),
                 };

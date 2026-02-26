@@ -53,7 +53,7 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
                 }
             }
 
-            if let Some(depth) = obj.get("depth") {
+            if let Some(depth) = obj.get("depth").filter(|v| !v.is_null()) {
                 let valid = depth.as_u64().map(|d| d > 0 && d <= 64).unwrap_or(false);
                 if !valid {
                     return Err(StructuredError::new(
@@ -63,7 +63,7 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
                 }
             }
 
-            if obj.get("selector").is_some() {
+            if obj.get("selector").is_some_and(|v| !v.is_null()) {
                 validate_selector_field(obj, "selector")?;
             }
         }
@@ -122,7 +122,7 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
         }
 
         "screenshot" => {
-            if let Some(inline) = obj.get("inline") {
+            if let Some(inline) = obj.get("inline").filter(|v| !v.is_null()) {
                 if !inline.is_boolean() {
                     return Err(StructuredError::new(
                         ERR_INVALID_PARAMS,
@@ -131,7 +131,7 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
                 }
             }
 
-            if let Some(full_page) = obj.get("full_page") {
+            if let Some(full_page) = obj.get("full_page").filter(|v| !v.is_null()) {
                 if !full_page.is_boolean() {
                     return Err(StructuredError::new(
                         ERR_INVALID_PARAMS,
@@ -256,10 +256,11 @@ fn validate_wait_modes(obj: &Map<String, Value>) -> Result<(), StructuredError> 
         "js_condition",
     ];
 
+    // Treat JSON null as absent (LLMs often emit null for unused optional fields).
     let set_modes: Vec<&str> = mode_keys
         .iter()
         .copied()
-        .filter(|key| obj.get(*key).is_some())
+        .filter(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
         .collect();
 
     if set_modes.len() != 1 {
@@ -269,7 +270,7 @@ fn validate_wait_modes(obj: &Map<String, Value>) -> Result<(), StructuredError> 
         ));
     }
 
-    if let Some(ms) = obj.get("ms") {
+    if let Some(ms) = obj.get("ms").filter(|v| !v.is_null()) {
         let valid = ms.as_u64().map(|m| m > 0 && m <= 120_000).unwrap_or(false);
         if !valid {
             return Err(StructuredError::new(
@@ -279,19 +280,19 @@ fn validate_wait_modes(obj: &Map<String, Value>) -> Result<(), StructuredError> 
         }
     }
 
-    if obj.get("ref").is_some() {
+    if obj.get("ref").is_some_and(|v| !v.is_null()) {
         validate_ref_field(obj, "ref")?;
     }
 
-    if obj.get("selector").is_some() {
+    if obj.get("selector").is_some_and(|v| !v.is_null()) {
         validate_selector_field(obj, "selector")?;
     }
 
-    if obj.get("text").is_some() {
+    if obj.get("text").is_some_and(|v| !v.is_null()) {
         require_non_empty_string(obj, "text")?;
     }
 
-    if obj.get("url_pattern").is_some() {
+    if obj.get("url_pattern").is_some_and(|v| !v.is_null()) {
         require_non_empty_string(obj, "url_pattern")?;
     }
 
@@ -307,7 +308,7 @@ fn validate_wait_modes(obj: &Map<String, Value>) -> Result<(), StructuredError> 
         }
     }
 
-    if obj.get("js_condition").is_some() {
+    if obj.get("js_condition").is_some_and(|v| !v.is_null()) {
         require_non_empty_string(obj, "js_condition")?;
     }
 
@@ -319,8 +320,9 @@ fn validate_single_target(
     ref_key: &str,
     selector_key: &str,
 ) -> Result<(), StructuredError> {
-    let has_ref = obj.get(ref_key).is_some();
-    let has_selector = obj.get(selector_key).is_some();
+    // Treat JSON null as absent (LLMs often emit null for unused optional fields).
+    let has_ref = obj.get(ref_key).is_some_and(|v| !v.is_null());
+    let has_selector = obj.get(selector_key).is_some_and(|v| !v.is_null());
 
     if !has_ref && !has_selector {
         return Err(StructuredError::new(
@@ -348,8 +350,9 @@ fn validate_optional_target(
     ref_key: &str,
     selector_key: &str,
 ) -> Result<(), StructuredError> {
-    let has_ref = obj.get(ref_key).is_some();
-    let has_selector = obj.get(selector_key).is_some();
+    // Treat JSON null as absent (LLMs often emit null for unused optional fields).
+    let has_ref = obj.get(ref_key).is_some_and(|v| !v.is_null());
+    let has_selector = obj.get(selector_key).is_some_and(|v| !v.is_null());
 
     if has_ref && has_selector {
         return Err(StructuredError::new(
@@ -452,16 +455,24 @@ pub fn require_non_empty_string<'a>(
     obj: &'a Map<String, Value>,
     key: &str,
 ) -> Result<&'a str, StructuredError> {
-    match obj.get(key).and_then(Value::as_str).map(str::trim) {
-        Some(value) if !value.is_empty() => Ok(value),
-        Some(_) => Err(StructuredError::new(
-            ERR_INVALID_PARAMS,
-            format!("Field '{key}' must not be empty"),
-        )),
+    match obj.get(key) {
+        // Field absent entirely
         None => Err(StructuredError::new(
             ERR_INVALID_PARAMS,
             format!("Missing required field '{key}'"),
         )),
+        // LLMs often emit null for fields they don't intend to set; treat as absent.
+        Some(v) if v.is_null() => Err(StructuredError::new(
+            ERR_INVALID_PARAMS,
+            format!("Missing required field '{key}'"),
+        )),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(value) if !value.is_empty() => Ok(value),
+            _ => Err(StructuredError::new(
+                ERR_INVALID_PARAMS,
+                format!("Field '{key}' must not be empty"),
+            )),
+        },
     }
 }
 
@@ -686,5 +697,64 @@ mod tests {
             }),
         );
         assert!(result.is_ok());
+    }
+
+    /// Regression test: LLMs often emit all tool params as null for fields they don't intend to
+    /// set. Validate that an "open" call with url=null produces the same "Missing required field"
+    /// error as a genuinely absent url, not a false "must not be empty" error.
+    #[test]
+    fn test_open_with_null_url_is_treated_as_missing() {
+        let err = validate_action_params(
+            "open",
+            &json!({
+                "action": "open",
+                "backend_url": null,
+                "ref": null,
+                "selector": null,
+                "session_id": null,
+                "timeout_ms": null,
+                "url": null,
+                "value": null
+            }),
+        )
+        .expect_err("null url must fail");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+        assert!(
+            err.message.contains("Missing required field 'url'"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    /// LLM emits all wait-mode fields as null — should fail with "requires exactly one wait mode",
+    /// not pass through with zero modes counted.
+    #[test]
+    fn test_wait_with_all_null_fields_requires_one_mode() {
+        let err = validate_action_params(
+            "wait",
+            &json!({
+                "action": "wait",
+                "ms": null,
+                "ref": null,
+                "selector": null,
+                "text": null,
+                "url_pattern": null,
+                "load_state": null,
+                "js_condition": null,
+            }),
+        )
+        .expect_err("all-null wait must fail");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// LLM emits selector=null for a click action — should be treated as no selector provided.
+    #[test]
+    fn test_click_with_null_selector_treated_as_missing() {
+        let err = validate_action_params(
+            "click",
+            &json!({"action": "click", "session_id": "s1", "selector": null, "ref": null}),
+        )
+        .expect_err("null selector must fail");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
     }
 }

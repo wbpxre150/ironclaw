@@ -429,6 +429,12 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
             let workspace = workspace.clone();
+            let signal_attachments_dir = self
+                .config
+                .channels
+                .signal
+                .as_ref()
+                .map(|s| s.attachments_dir.clone());
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -439,6 +445,9 @@ impl AppBuilder {
                     }
                     if let Some(ref ws) = workspace {
                         loader = loader.with_workspace(Arc::clone(ws));
+                    }
+                    if let Some(dir) = signal_attachments_dir {
+                        loader = loader.with_attachment_dir(dir);
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {

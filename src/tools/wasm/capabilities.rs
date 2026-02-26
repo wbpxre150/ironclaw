@@ -12,6 +12,7 @@
 //! - **WebSocket**: Persistent WebSocket connections with connection pooling
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,8 @@ pub struct Capabilities {
     pub secrets: Option<SecretsCapability>,
     /// WebSocket connections.
     pub websocket: Option<WebSocketCapability>,
+    /// Directory to write attachment files into (enables `attachment-save` host func).
+    pub attachment_dir: Option<PathBuf>,
 }
 
 impl Capabilities {
@@ -81,6 +84,12 @@ impl Capabilities {
     /// Enable WebSocket connections.
     pub fn with_websocket(mut self, allowlist: Vec<WebSocketEndpoint>) -> Self {
         self.websocket = Some(WebSocketCapability::new(allowlist));
+        self
+    }
+
+    /// Set the directory for the `attachment-save` host function.
+    pub fn with_attachment_dir(mut self, dir: PathBuf) -> Self {
+        self.attachment_dir = Some(dir);
         self
     }
 }

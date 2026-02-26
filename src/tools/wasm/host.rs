@@ -22,7 +22,10 @@
 //!                          (sanitized, no secrets)
 //! ```
 
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::Engine;
 
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::error::WasmError;
@@ -82,6 +85,10 @@ pub struct HostState {
     http_request_count: u32,
     /// Tool invoke count for rate limiting within this execution.
     tool_invoke_count: u32,
+    /// Directory to write attachment files (enables `attachment_save` host func).
+    attachment_dir: Option<PathBuf>,
+    /// Paths of files saved via `attachment_save` during this execution.
+    saved_attachments: Vec<String>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -108,6 +115,8 @@ impl HostState {
             user_id: None,
             http_request_count: 0,
             tool_invoke_count: 0,
+            attachment_dir: None,
+            saved_attachments: Vec::new(),
         }
     }
 
@@ -121,12 +130,20 @@ impl HostState {
             user_id: Some(user_id.into()),
             http_request_count: 0,
             tool_invoke_count: 0,
+            attachment_dir: None,
+            saved_attachments: Vec::new(),
         }
     }
 
     /// Create a minimal host state with no capabilities.
     pub fn minimal() -> Self {
         Self::new(Capabilities::default())
+    }
+
+    /// Set the directory for attachment saves.
+    pub fn with_attachment_dir(mut self, dir: PathBuf) -> Self {
+        self.attachment_dir = Some(dir);
+        self
     }
 
     /// Get the user ID if set.
@@ -413,6 +430,77 @@ impl HostState {
     /// Get tool invoke count for this execution.
     pub fn tool_invoke_count(&self) -> u32 {
         self.tool_invoke_count
+    }
+
+    /// Save base64-encoded binary data to the attachments directory.
+    ///
+    /// Decodes the data, writes it to a unique file in `attachment_dir`, and
+    /// records the absolute path in `saved_attachments` so the wrapper can
+    /// include it in `ToolOutput::attachments`.
+    pub fn attachment_save(
+        &mut self,
+        data_base64: &str,
+        filename_hint: &str,
+    ) -> Result<String, String> {
+        let dir = self
+            .attachment_dir
+            .as_ref()
+            .ok_or_else(|| "attachment capability not configured".to_string())?;
+
+        // Decode base64 data
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .map_err(|e| format!("base64 decode failed: {e}"))?;
+
+        // Sanitize filename hint: keep only alphanumeric, dash, underscore, dot
+        let safe_hint: String = filename_hint
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe_hint = if safe_hint.is_empty() {
+            "attachment".to_string()
+        } else {
+            safe_hint
+        };
+
+        // Generate unique filename using current timestamp
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let filename = format!("{}-{}", now_ms, safe_hint);
+        let file_path = dir.join(&filename);
+
+        // Create directory if needed and write the file
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create attachments dir: {e}"))?;
+        std::fs::write(&file_path, &bytes)
+            .map_err(|e| format!("failed to write attachment: {e}"))?;
+
+        let abs_path = file_path
+            .to_str()
+            .ok_or_else(|| "attachment path is not valid UTF-8".to_string())?
+            .to_string();
+
+        tracing::trace!(
+            path = %abs_path,
+            bytes = bytes.len(),
+            "WASM attachment_save: wrote file"
+        );
+
+        self.saved_attachments.push(abs_path.clone());
+        Ok(abs_path)
+    }
+
+    /// Drain and return all attachment paths saved during this execution.
+    pub fn take_attachments(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.saved_attachments)
     }
 }
 

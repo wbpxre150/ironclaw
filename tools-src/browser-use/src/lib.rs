@@ -43,7 +43,7 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
                 "action": {
                     "type": "string",
                     "enum": CANONICAL_ACTIONS,
-                    "description": "Canonical browser-use action (aliases like goto/navigate normalize to open)."
+                    "description": "Canonical browser-use action (aliases like goto/navigate normalize to open). Per-action required fields: open→url; fill/type/select→selector+value; click/hover/etc→selector; press→key; session_resume/session_close/state_save/state_load→session_id; get_attr→selector+name; upload→selector+files; eval→script; wait→one of ms/selector/text/url_pattern/load_state/js_condition. Do NOT emit null for required fields — omit them entirely if not needed."
                 },
                 "session_id": {
                     "type": "string",
@@ -87,7 +87,10 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
          element interactions (click/type/fill/hover/select/scroll), content retrieval (text/HTML/attrs), \
          screenshots, JavaScript evaluation, and browser storage operations. Actions chain across calls \
          within the same session (session_create → open → click → fill all operate on the same page). \
-         Uses selector-based element targeting. Configure BROWSERLESS_ENABLED=true to use."
+         Uses selector-based element targeting. Configure BROWSERLESS_ENABLED=true to use. \
+         The `screenshot` action returns `{\"saved_to\": \"/path/to/file.png\", \"mimeType\": \"image/png\"}` \
+         when the attachment capability is configured (Signal channel), or falls back to \
+         `{\"screenshot\": \"<base64>\", \"mimeType\": \"image/png\"}` otherwise."
             .to_string()
     }
 }
@@ -106,7 +109,7 @@ fn execute_inner(raw_params: &str) -> String {
         );
     }
 
-    let params: Value = match serde_json::from_str(raw_params) {
+    let mut params: Value = match serde_json::from_str(raw_params) {
         Ok(v) => v,
         Err(err) => {
             return error_envelope(
@@ -122,36 +125,40 @@ fn execute_inner(raw_params: &str) -> String {
         }
     };
 
-    let Some(params_obj) = params.as_object() else {
-        return error_envelope(
-            None,
-            None,
-            StructuredError::new(ERR_INVALID_PARAMS, "Parameters must be a JSON object")
-                .with_hint("Expected shape: { \"action\": \"...\", ... }"),
-            None,
-        );
-    };
-
-    let raw_action = match params_obj.get("action").and_then(Value::as_str) {
-        Some(action) if !action.trim().is_empty() => action,
-        _ => {
+    // Extract action and session_id as owned Strings early so we can later mutate params.
+    let (raw_action, maybe_session_id) = {
+        let Some(obj) = params.as_object() else {
             return error_envelope(
                 None,
-                extract_optional_session_id(params_obj),
-                StructuredError::new(ERR_INVALID_ACTION, "Missing required 'action' string")
-                    .with_hint(
-                        "Set action to a canonical command like 'open', 'snapshot', or 'click'.",
-                    )
-                    .with_details(json!({"allowed_actions": CANONICAL_ACTIONS})),
+                None,
+                StructuredError::new(ERR_INVALID_PARAMS, "Parameters must be a JSON object")
+                    .with_hint("Expected shape: { \"action\": \"...\", ... }"),
                 None,
             );
-        }
+        };
+        let raw = match obj.get("action").and_then(Value::as_str) {
+            Some(a) if !a.trim().is_empty() => a.to_owned(),
+            _ => {
+                return error_envelope(
+                    None,
+                    extract_optional_session_id(obj),
+                    StructuredError::new(ERR_INVALID_ACTION, "Missing required 'action' string")
+                        .with_hint(
+                            "Set action to a canonical command like 'open', 'snapshot', or 'click'.",
+                        )
+                        .with_details(json!({"allowed_actions": CANONICAL_ACTIONS})),
+                    None,
+                );
+            }
+        };
+        let sid = extract_optional_session_id(obj);
+        (raw, sid)
     };
 
-    let Some(action) = normalize_action(raw_action) else {
+    let Some(action) = normalize_action(&raw_action) else {
         return error_envelope(
             Some(raw_action.trim()),
-            extract_optional_session_id(params_obj),
+            maybe_session_id,
             StructuredError::new(
                 ERR_INVALID_ACTION,
                 format!("Unknown action '{raw_action}'"),
@@ -161,6 +168,23 @@ fn execute_inner(raw_params: &str) -> String {
             None,
         );
     };
+
+    // When the LLM emits `wait` with no mode fields (all null or absent), default to
+    // `load_state: "load"` so the call succeeds rather than returning an error.
+    if action == "wait" {
+        let wait_mode_keys = ["ms", "ref", "selector", "text", "url_pattern", "load_state", "js_condition"];
+        let has_any_mode = params
+            .as_object()
+            .map(|obj| wait_mode_keys.iter().any(|k| obj.get(*k).is_some_and(|v| !v.is_null())))
+            .unwrap_or(false);
+        if !has_any_mode {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("load_state".to_string(), serde_json::json!("load"));
+            }
+        }
+    }
+
+    let params_obj = params.as_object().expect("params is a JSON object");
 
     if let Err(err) = validate_action_params(action, &params) {
         return error_envelope(
@@ -188,7 +212,7 @@ fn execute_inner(raw_params: &str) -> String {
     match dispatch_with_retries(action, &params, &backend_url, timeout_ms) {
         Ok(success) => {
             let mut warnings = success.warnings;
-            if let Some(note) = alias_note(raw_action, action) {
+            if let Some(note) = alias_note(&raw_action, action) {
                 warnings.push(note);
             }
 

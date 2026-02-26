@@ -162,6 +162,20 @@ interface host {
     ///
     /// Returns true if the secret exists and is accessible to this tool.
     secret-exists: func(name: string) -> bool;
+
+    // ==================== Attachment Capability ====================
+
+    /// Save binary data (base64-encoded) to the agent's attachment staging area.
+    ///
+    /// The host decodes the base64 data, generates a unique filename with the
+    /// given hint as suffix (e.g. "screenshot.png"), writes it to the configured
+    /// attachments directory, and returns the absolute path.
+    ///
+    /// The returned path is automatically included in the tool's attachment list,
+    /// so the channel (Signal, etc.) will send it alongside the text response.
+    ///
+    /// Returns Err if attachment capability not configured or write fails.
+    attachment-save: func(data-base64: string, filename-hint: string) -> result<string, string>;
 }
 
 /// Tool interface that sandboxed tools must implement.

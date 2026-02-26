@@ -872,10 +872,12 @@ impl Channel for SignalChannel {
             self.rest_send(&target, &response.content, &response.attachments)
                 .await?;
         } else {
+            // JSON-RPC send: signal-cli accepts local file paths in "attachments".
+            // This works when IronClaw and signal-cli share the same filesystem.
             if !response.attachments.is_empty() {
-                tracing::warn!(
+                tracing::debug!(
                     count = response.attachments.len(),
-                    "Signal: attachments dropped — set SIGNAL_SEND_VIA_REST=true to send images"
+                    "Signal: sending attachments via JSON-RPC (paths must be accessible to signal-cli)"
                 );
             }
             let params =

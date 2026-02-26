@@ -1162,10 +1162,22 @@ fn cdp_screenshot(
     )?;
 
     let data = result.get("data").and_then(Value::as_str).unwrap_or("");
-    ok_success(json!({
-        "screenshot": data,
-        "mimeType": "image/png"
-    }))
+
+    // Try to save directly to the attachments directory so the LLM receives
+    // only a file path instead of a large base64 blob.
+    match wit_host::attachment_save(data, "screenshot.png") {
+        Ok(path) => ok_success(json!({
+            "saved_to": path,
+            "mimeType": "image/png"
+        })),
+        Err(_) => {
+            // Fallback: return base64 inline (e.g. if Signal not configured)
+            ok_success(json!({
+                "screenshot": data,
+                "mimeType": "image/png"
+            }))
+        }
+    }
 }
 
 // === Eval ===

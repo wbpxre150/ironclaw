@@ -158,9 +158,15 @@ impl StoreData {
         // Minimal WASI context: no filesystem, no env vars (security)
         let wasi = WasiCtxBuilder::new().build();
 
+        let attachment_dir = capabilities.attachment_dir.clone();
+        let mut host_state = HostState::new(capabilities);
+        if let Some(dir) = attachment_dir {
+            host_state = host_state.with_attachment_dir(dir);
+        }
+
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
-            host_state: HostState::new(capabilities),
+            host_state,
             wasi,
             table: ResourceTable::new(),
             tool_name,
@@ -513,6 +519,14 @@ impl near::agent::host::Host for StoreData {
 
     fn secret_exists(&mut self, name: String) -> bool {
         self.host_state.secret_exists(&name)
+    }
+
+    fn attachment_save(
+        &mut self,
+        data_base64: String,
+        filename_hint: String,
+    ) -> Result<String, String> {
+        self.host_state.attachment_save(&data_base64, &filename_hint)
     }
 
     fn ws_connect(
@@ -970,7 +984,7 @@ impl WasmToolWrapper {
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
         deadline: Option<std::time::Instant>,
-    ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
+    ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>, Vec<String>), WasmError> {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
 
@@ -1038,8 +1052,9 @@ impl WasmToolWrapper {
             }
         })?;
 
-        // Get logs from host state
+        // Get logs and saved attachments from host state
         let logs = store.data_mut().host_state.take_logs();
+        let attachments = store.data_mut().host_state.take_attachments();
 
         // Check for tool-level error
         if let Some(err) = response.error {
@@ -1047,7 +1062,7 @@ impl WasmToolWrapper {
         }
 
         // Return result (or empty string if none)
-        Ok((response.output.unwrap_or_default(), logs))
+        Ok((response.output.unwrap_or_default(), logs, attachments))
     }
 }
 
@@ -1200,7 +1215,7 @@ impl Tool for WasmToolWrapper {
         let duration = start.elapsed();
 
         match result {
-            Ok(Ok((result_json, logs))) => {
+            Ok(Ok((result_json, logs, saved_attachments))) => {
                 // Emit collected logs
                 for log in logs {
                     match log.level {
@@ -1216,7 +1231,9 @@ impl Tool for WasmToolWrapper {
                 let result: serde_json::Value = serde_json::from_str(&result_json)
                     .unwrap_or(serde_json::Value::String(result_json));
 
-                Ok(ToolOutput::success(result, duration))
+                let output = ToolOutput::success(result, duration)
+                    .with_attachments(saved_attachments);
+                Ok(output)
             }
             Ok(Err(wasm_err)) => Err(wasm_err.into()),
             Err(_) => Err(WasmError::Timeout(timeout).into()),
