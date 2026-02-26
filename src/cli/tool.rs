@@ -26,12 +26,12 @@ fn default_tools_dir() -> PathBuf {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ToolCommand {
-    /// Install a WASM tool from source directory or .wasm file
+    /// Install a WASM tool from a registry name, source directory, or .wasm file
     Install {
-        /// Path to tool source directory (with Cargo.toml) or .wasm file
-        path: PathBuf,
+        /// Registry tool name (e.g. "browser-use"), path to source directory, or .wasm file
+        source: String,
 
-        /// Tool name (defaults to directory/file name)
+        /// Tool name (defaults to directory/file name or registry name)
         #[arg(short, long)]
         name: Option<String>,
 
@@ -106,14 +106,14 @@ pub enum ToolCommand {
 pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
     match cmd {
         ToolCommand::Install {
-            path,
+            source,
             name,
             capabilities,
             target,
             release,
             skip_build,
             force,
-        } => install_tool(path, name, capabilities, target, release, skip_build, force).await,
+        } => install_tool(source, name, capabilities, target, release, skip_build, force).await,
         ToolCommand::List { dir, verbose } => list_tools(dir, verbose).await,
         ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
         ToolCommand::Info { name_or_path, dir } => show_tool_info(name_or_path, dir).await,
@@ -123,7 +123,7 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
 
 /// Install a WASM tool.
 async fn install_tool(
-    path: PathBuf,
+    source: String,
     name: Option<String>,
     capabilities: Option<PathBuf>,
     target: Option<PathBuf>,
@@ -131,10 +131,38 @@ async fn install_tool(
     skip_build: bool,
     force: bool,
 ) -> anyhow::Result<()> {
-    let target_dir = target.unwrap_or_else(default_tools_dir);
+    let target_dir = target.clone().unwrap_or_else(default_tools_dir);
 
-    maybe_prepare_browser_use_chromium(&path, name.as_deref()).await?;
+    // Dispatch: registry name vs local path
+    let as_path = PathBuf::from(&source);
+    if as_path.exists() || source.starts_with('.') || source.starts_with('/') {
+        maybe_prepare_browser_use_chromium(&as_path, name.as_deref()).await?;
+        return install_tool_from_path(
+            as_path,
+            name,
+            capabilities,
+            target_dir,
+            release,
+            skip_build,
+            force,
+        )
+        .await;
+    }
 
+    // Registry name install
+    install_tool_from_registry(&source, target, force).await
+}
+
+/// Install a WASM tool from a local path (directory or .wasm file).
+async fn install_tool_from_path(
+    path: PathBuf,
+    name: Option<String>,
+    capabilities: Option<PathBuf>,
+    target_dir: PathBuf,
+    release: bool,
+    skip_build: bool,
+    force: bool,
+) -> anyhow::Result<()> {
     // Determine if path is a directory (source) or .wasm file
     let metadata = fs::metadata(&path).await?;
 
@@ -256,6 +284,97 @@ async fn install_tool(
 
     if target_caps.exists() {
         println!("  Caps: {}", target_caps.display());
+    }
+
+    Ok(())
+}
+
+/// Install a WASM tool by registry name.
+async fn install_tool_from_registry(
+    tool_name: &str,
+    target: Option<PathBuf>,
+    force: bool,
+) -> anyhow::Result<()> {
+    let catalog = crate::registry::catalog::RegistryCatalog::load_or_embedded()
+        .map_err(|e| anyhow::anyhow!("Failed to load registry catalog: {}", e))?;
+
+    // Exact lookup first
+    let manifest = match catalog.get_strict(tool_name) {
+        Ok(m) => m,
+        Err(crate::registry::catalog::RegistryError::ExtensionNotFound(_)) => {
+            // Fuzzy search for helpful error message
+            let candidates = catalog.search(tool_name);
+            if candidates.is_empty() {
+                let all: Vec<_> = catalog.all().iter().map(|m| m.name.as_str()).collect();
+                anyhow::bail!(
+                    "Tool '{}' not found in the registry.\n\nAvailable tools: {}",
+                    tool_name,
+                    if all.is_empty() {
+                        "(registry is empty)".to_string()
+                    } else {
+                        all.join(", ")
+                    }
+                );
+            }
+            if candidates.len() == 1 {
+                // Unambiguous fuzzy match — use it
+                catalog.get_strict(candidates[0].name.as_str())
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                let names: Vec<_> = candidates.iter().map(|m| m.name.as_str()).collect();
+                anyhow::bail!(
+                    "Tool '{}' not found. Did you mean one of: {}?",
+                    tool_name,
+                    names.join(", ")
+                );
+            }
+        }
+        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+    };
+
+    let target_dir = target.unwrap_or_else(default_tools_dir);
+
+    // repo_root is the parent of the registry/ dir (used for source fallback)
+    let repo_root = catalog
+        .root()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let installer = crate::registry::installer::RegistryInstaller::new(
+        repo_root,
+        target_dir.clone(),
+        // channels install into ~/.ironclaw/channels/ — keep default there
+        dirs::home_dir()
+            .map(|h| h.join(".ironclaw").join("channels"))
+            .unwrap_or_else(|| PathBuf::from(".ironclaw/channels")),
+    );
+
+    let outcome = installer
+        .install_from_source(manifest, force)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    for warning in &outcome.warnings {
+        println!("  Warning: {}", warning);
+    }
+
+    let wasm_bytes = fs::read(&outcome.wasm_path).await?;
+    let hash = compute_binary_hash(&wasm_bytes);
+    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+
+    println!("\nInstalled successfully:");
+    println!("  Name: {}", outcome.name);
+    println!("  WASM: {}", outcome.wasm_path.display());
+    println!("  Size: {} bytes", wasm_bytes.len());
+    println!("  Hash: {}", &hash_hex[..16]);
+    if outcome.has_capabilities {
+        println!(
+            "  Caps: {}",
+            target_dir
+                .join(format!("{}.capabilities.json", outcome.name))
+                .display()
+        );
     }
 
     Ok(())
