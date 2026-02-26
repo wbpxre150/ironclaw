@@ -75,7 +75,9 @@ pub fn dispatch_session_action(
 /// Dispatch a page action using CDP through a session's persistent page.
 /// If session_id is provided, uses a pooled WebSocket connection so the
 /// browser context (and page state) persists across tool invocations.
-/// If no session_id, creates an ephemeral context, runs the action, disposes.
+/// If no session_id is provided, auto-creates a persistent session so the
+/// browser context survives to the next call. The new session_id is returned
+/// in the response so the caller can pass it on subsequent actions.
 pub fn dispatch_page_action(
     action: &str,
     params: &Map<String, Value>,
@@ -95,15 +97,48 @@ pub fn dispatch_page_action(
         dispatch_with_session(&mut client, &conn, action, params, session_id)
         // Don't close -- the pool manages the connection lifecycle.
     } else {
-        // Ephemeral connection: fresh context per call
-        let conn = CdpClient::connect(backend_url).map_err(|e| DispatchFailure {
-            error: StructuredError::new(ERR_NETWORK_FAILURE, e),
-            attempts: 1,
-        })?;
+        // No session_id provided: auto-create a persistent session so the
+        // browser context survives to the next tool call. The session_id is
+        // returned in the response so the LLM can pass it on subsequent calls.
+        let auto_session_id = crate::cdp::generate_session_id();
+        let conn =
+            CdpClient::connect_pooled(backend_url, &auto_session_id).map_err(|e| DispatchFailure {
+                error: StructuredError::new(ERR_NETWORK_FAILURE, e),
+                attempts: 1,
+            })?;
 
-        let result = dispatch_ephemeral(&mut client, &conn, action, params, backend_url);
-        let _ = conn.close();
-        result
+        let (context_id, target_id, cdp_session_id) =
+            create_fresh_session_state(&mut client, &conn, &auto_session_id)?;
+        update_session_workspace(&auto_session_id, &context_id, &target_id, &cdp_session_id);
+
+        // Inject the auto-created session_id so dispatch_with_session can find
+        // the workspace state we just wrote.
+        let mut extended_params = params.clone();
+        extended_params.insert(
+            "session_id".to_string(),
+            Value::String(auto_session_id.clone()),
+        );
+
+        let mut result =
+            dispatch_with_session(&mut client, &conn, action, &extended_params, &auto_session_id)?;
+
+        // Surface the auto-created session_id so callers know to reuse it.
+        if let Some(obj) = result.data.as_object_mut() {
+            obj.insert(
+                "session_id".to_string(),
+                Value::String(auto_session_id.clone()),
+            );
+            obj.insert("auto_session".to_string(), Value::Bool(true));
+        }
+        result.session_id = Some(auto_session_id);
+        result.warnings.push(
+            "No session_id provided — auto-created a persistent session. \
+             Pass the returned session_id to all subsequent browser actions to keep \
+             the same page context."
+                .to_string(),
+        );
+
+        Ok(result)
     }
 }
 
@@ -183,38 +218,6 @@ fn dispatch_with_session(
     // Don't dispose context -- pooled connection keeps it alive for next call.
 }
 
-fn dispatch_ephemeral(
-    client: &mut CdpClient,
-    conn: &wit_host::WsConnection,
-    action: &str,
-    params: &Map<String, Value>,
-    _backend_url: &str,
-) -> Result<DispatchSuccess, DispatchFailure> {
-    // Create ephemeral browser context + page
-    let context_id = client
-        .create_browser_context(conn)
-        .map_err(|e| DispatchFailure {
-            error: StructuredError::new(
-                ERR_NETWORK_FAILURE,
-                format!("Failed to create context: {e}"),
-            ),
-            attempts: 1,
-        })?;
-
-    let (target_id, cdp_session_id) = create_page_target(client, conn, &context_id)?;
-
-    let result = dispatch_cdp_action(action, params, client, conn, None, &cdp_session_id);
-
-    // Clean up: close the target and dispose context
-    let _ = client.send_command(
-        conn,
-        "Target.closeTarget",
-        Some(json!({ "targetId": target_id })),
-    );
-    let _ = client.dispose_browser_context(conn, &context_id);
-
-    result
-}
 
 /// Create a fresh browser context + page for a session on a pooled connection.
 /// Returns (context_id, target_id, cdp_session_id).
