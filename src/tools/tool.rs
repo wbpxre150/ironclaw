@@ -110,6 +110,15 @@ pub struct ToolOutput {
     /// Raw output before sanitization (for debugging).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Local file paths to send as channel attachments (e.g. Signal images).
+    ///
+    /// When non-empty, the paths are threaded through the response pipeline and
+    /// passed to the channel's `respond` / `broadcast` methods so that
+    /// attachment-capable channels (Signal native RPC, REST API, etc.) can
+    /// include the files alongside the text reply.  Channels that do not
+    /// support attachments silently ignore this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 impl ToolOutput {
@@ -120,6 +129,7 @@ impl ToolOutput {
             cost: None,
             duration,
             raw: None,
+            attachments: vec![],
         }
     }
 
@@ -130,7 +140,14 @@ impl ToolOutput {
             cost: None,
             duration,
             raw: None,
+            attachments: vec![],
         }
+    }
+
+    /// Attach local file paths to be sent as channel attachments alongside the response.
+    pub fn with_attachments(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.attachments.extend(paths.into_iter().map(Into::into));
+        self
     }
 
     /// Set the cost.

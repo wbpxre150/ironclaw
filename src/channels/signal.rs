@@ -878,7 +878,8 @@ impl Channel for SignalChannel {
                     "Signal: attachments dropped — set SIGNAL_SEND_VIA_REST=true to send images"
                 );
             }
-            let params = self.build_rpc_params(&target, Some(&response.content), &[]);
+            let params =
+                self.build_rpc_params(&target, Some(&response.content), &response.attachments);
             self.rpc_request("send", params).await?;
         }
 
@@ -939,13 +940,8 @@ impl Channel for SignalChannel {
             self.rest_send(&target, &response.content, &response.attachments)
                 .await?;
         } else {
-            if !response.attachments.is_empty() {
-                tracing::warn!(
-                    count = response.attachments.len(),
-                    "Signal: attachments dropped — set SIGNAL_SEND_VIA_REST=true to send images"
-                );
-            }
-            let params = self.build_rpc_params(&target, Some(&response.content), &[]);
+            let params =
+                self.build_rpc_params(&target, Some(&response.content), &response.attachments);
             self.rpc_request("send", params).await?;
         }
 

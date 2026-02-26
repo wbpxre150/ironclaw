@@ -16,10 +16,18 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 
+/// Return type of `execute_chat_tool_standalone`: serialized JSON result + attachment paths.
+type ChatToolResult = Result<(String, Vec<String>), Error>;
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
-    Response(String),
+    Response {
+        /// The LLM's text reply.
+        text: String,
+        /// Local file paths collected from tool outputs, to send as channel attachments.
+        attachments: Vec<String>,
+    },
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
@@ -126,6 +134,8 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+        // Accumulate attachment paths from all tool executions across iterations.
+        let mut pending_attachments: Vec<String> = Vec::new();
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -273,7 +283,10 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response(text));
+                    return Ok(AgenticLoopResult::Response {
+                        text,
+                        attachments: pending_attachments,
+                    });
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -408,7 +421,7 @@ impl Agent {
                     // === Phase 2: Parallel execution ===
                     // Execute runnable tools and slot results back by preflight
                     // index so Phase 3 can iterate in original order.
-                    let mut exec_results: Vec<Option<Result<String, Error>>> =
+                    let mut exec_results: Vec<Option<ChatToolResult>> =
                         (0..preflight.len()).map(|_| None).collect();
 
                     if runnable.len() <= 1 {
@@ -518,12 +531,13 @@ impl Agent {
                                     runnable_idx,
                                     "Filling failed task slot with error"
                                 );
-                                exec_results[*pf_idx] =
-                                    Some(Err(crate::error::ToolError::ExecutionFailed {
+                                exec_results[*pf_idx] = Some(Err(
+                                    crate::error::ToolError::ExecutionFailed {
                                         name: tc.name.clone(),
                                         reason: "Task failed during execution".to_string(),
                                     }
-                                    .into()));
+                                    .into(),
+                                ));
                             }
                         }
                     }
@@ -561,7 +575,7 @@ impl Agent {
                                     });
 
                                 // Send ToolResult preview
-                                if let Ok(ref output) = tool_result
+                                if let Ok((ref output, _)) = tool_result
                                     && !output.is_empty()
                                 {
                                     let _ = self
@@ -584,7 +598,7 @@ impl Agent {
                                         && let Some(turn) = thread.last_turn_mut()
                                     {
                                         match &tool_result {
-                                            Ok(output) => {
+                                            Ok((output, _)) => {
                                                 turn.record_tool_result(serde_json::json!(output));
                                             }
                                             Err(e) => {
@@ -596,11 +610,20 @@ impl Agent {
 
                                 // Check for auth awaiting — defer the return
                                 // until all results are recorded.
+                                // Convert to Result<String, Error> for the auth helpers.
+                                let text_result: Result<String, Error> = match &tool_result {
+                                    Ok((text, _)) => Ok(text.clone()),
+                                    Err(e) => Err(crate::error::ToolError::ExecutionFailed {
+                                        name: tc.name.clone(),
+                                        reason: e.to_string(),
+                                    }
+                                    .into()),
+                                };
                                 if deferred_auth.is_none()
                                     && let Some((ext_name, instructions)) =
-                                        check_auth_required(&tc.name, &tool_result)
+                                        check_auth_required(&tc.name, &text_result)
                                 {
-                                    let auth_data = parse_auth_result(&tool_result);
+                                    let auth_data = parse_auth_result(&text_result);
                                     {
                                         let mut sess = session.lock().await;
                                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -623,9 +646,10 @@ impl Agent {
                                     deferred_auth = Some(instructions);
                                 }
 
-                                // Sanitize and add tool result to context
+                                // Collect attachment paths and sanitize tool result for LLM context
                                 let result_content = match tool_result {
-                                    Ok(output) => {
+                                    Ok((output, attachments)) => {
+                                        pending_attachments.extend(attachments);
                                         let sanitized =
                                             self.safety().sanitize_tool_output(&tc.name, &output);
                                         self.safety().wrap_for_llm(
@@ -648,7 +672,10 @@ impl Agent {
 
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
-                        return Ok(AgenticLoopResult::Response(instructions));
+                        return Ok(AgenticLoopResult::Response {
+                            text: instructions,
+                            attachments: vec![],
+                        });
                     }
 
                     // Handle approval if a tool needed it
@@ -676,7 +703,7 @@ impl Agent {
         tool_name: &str,
         params: &serde_json::Value,
         job_ctx: &JobContext,
-    ) -> Result<String, Error> {
+    ) -> ChatToolResult {
         execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
     }
 }
@@ -686,13 +713,15 @@ impl Agent {
 /// This standalone function enables parallel invocation from spawned JoinSet
 /// tasks, which cannot borrow `&self`. It replicates the logic from
 /// `Agent::execute_chat_tool`.
+///
+/// Returns `(serialized_result, attachment_paths)`.
 pub(super) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &crate::safety::SafetyLayer,
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
-) -> Result<String, Error> {
+) -> ChatToolResult {
     let tool = tools
         .get(tool_name)
         .await
@@ -770,13 +799,14 @@ pub(super) async fn execute_chat_tool_standalone(
             reason: e.to_string(),
         })?;
 
-    serde_json::to_string_pretty(&result.result).map_err(|e| {
+    let attachments = result.attachments.clone();
+    let text = serde_json::to_string_pretty(&result.result).map_err(|e| {
         crate::error::ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             reason: format!("Failed to serialize result: {}", e),
         }
-        .into()
-    })
+    })?;
+    Ok((text, attachments))
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
@@ -1213,8 +1243,9 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let (output, attachments) = result.unwrap();
         assert!(output.contains("hello"));
+        assert!(attachments.is_empty());
     }
 
     #[tokio::test]

@@ -16,10 +16,13 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
+
+/// Return type of `execute_chat_tool_standalone` as used in the approval path.
+type ChatToolResult = Result<(String, Vec<String>), Error>;
 
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
@@ -292,7 +295,7 @@ impl Agent {
 
         // Complete, fail, or request approval
         match result {
-            Ok(AgenticLoopResult::Response(response)) => {
+            Ok(AgenticLoopResult::Response { text: response, attachments }) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -328,7 +331,7 @@ impl Agent {
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
 
-                Ok(SubmissionResult::response(response))
+                Ok(SubmissionResult::response_with_attachments(response, attachments))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
                 // Store pending approval in thread and update state
@@ -667,7 +670,10 @@ impl Agent {
                 )
                 .await;
 
-            if let Ok(ref output) = tool_result
+            // Accumulate attachment paths from all tool executions this approval turn.
+            let mut pending_attachments: Vec<String> = Vec::new();
+
+            if let Ok((ref output, _)) = tool_result
                 && !output.is_empty()
             {
                 let _ = self
@@ -687,13 +693,23 @@ impl Agent {
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
 
+            // Convert to Result<String, Error> for auth helpers.
+            let text_result: Result<String, Error> = match &tool_result {
+                Ok((text, _)) => Ok(text.clone()),
+                Err(e) => Err(crate::error::ToolError::ExecutionFailed {
+                    name: pending.tool_name.clone(),
+                    reason: e.to_string(),
+                }
+                .into()),
+            };
+
             // Record result in thread
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id)
                     && let Some(turn) = thread.last_turn_mut()
                 {
-                    match &tool_result {
+                    match &text_result {
                         Ok(output) => {
                             turn.record_tool_result(serde_json::json!(output));
                         }
@@ -707,13 +723,13 @@ impl Agent {
             // If tool_auth returned awaiting_token, enter auth mode and
             // return instructions directly (skip agentic loop continuation).
             if let Some((ext_name, instructions)) =
-                check_auth_required(&pending.tool_name, &tool_result)
+                check_auth_required(&pending.tool_name, &text_result)
             {
                 self.handle_auth_intercept(
                     &session,
                     thread_id,
                     message,
-                    &tool_result,
+                    &text_result,
                     ext_name,
                     instructions.clone(),
                 )
@@ -721,9 +737,10 @@ impl Agent {
                 return Ok(SubmissionResult::response(instructions));
             }
 
-            // Add tool result to context
+            // Collect attachments and add tool result to context
             let result_content = match tool_result {
-                Ok(output) => {
+                Ok((output, attachments)) => {
+                    pending_attachments.extend(attachments);
                     let sanitized = self
                         .safety()
                         .sanitize_tool_output(&pending.tool_name, &output);
@@ -791,8 +808,8 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
-                <= 1
+            let exec_results: Vec<(crate::llm::ToolCall, ChatToolResult)> =
+                if runnable.len() <= 1
             {
                 // Single tool (or none): execute inline
                 let mut results = Vec::new();
@@ -877,7 +894,7 @@ impl Agent {
                 }
 
                 // Collect and reorder by original index
-                let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
+                let mut ordered: Vec<Option<(crate::llm::ToolCall, ChatToolResult)>> =
                     (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
@@ -918,7 +935,7 @@ impl Agent {
             let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
-                if let Ok(ref output) = deferred_result
+                if let Ok((ref output, _)) = deferred_result
                     && !output.is_empty()
                 {
                     let _ = self
@@ -934,13 +951,23 @@ impl Agent {
                         .await;
                 }
 
+                // Convert to Result<String, Error> for auth helpers.
+                let deferred_text: Result<String, Error> = match &deferred_result {
+                    Ok((text, _)) => Ok(text.clone()),
+                    Err(e) => Err(crate::error::ToolError::ExecutionFailed {
+                        name: tc.name.clone(),
+                        reason: e.to_string(),
+                    }
+                    .into()),
+                };
+
                 // Record in thread
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                         && let Some(turn) = thread.last_turn_mut()
                     {
-                        match &deferred_result {
+                        match &deferred_text {
                             Ok(output) => turn.record_tool_result(serde_json::json!(output)),
                             Err(e) => turn.record_tool_error(e.to_string()),
                         }
@@ -950,13 +977,13 @@ impl Agent {
                 // Auth detection — defer return until all results are recorded
                 if deferred_auth.is_none()
                     && let Some((ext_name, instructions)) =
-                        check_auth_required(&tc.name, &deferred_result)
+                        check_auth_required(&tc.name, &deferred_text)
                 {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
-                        &deferred_result,
+                        &deferred_text,
                         ext_name,
                         instructions.clone(),
                     )
@@ -965,7 +992,8 @@ impl Agent {
                 }
 
                 let deferred_content = match deferred_result {
-                    Ok(output) => {
+                    Ok((output, attachments)) => {
+                        pending_attachments.extend(attachments);
                         let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
                         self.safety().wrap_for_llm(
                             &tc.name,
@@ -1038,7 +1066,7 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response { text: response, attachments: loop_attachments }) => {
                     thread.complete_turn(&response);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
@@ -1051,7 +1079,9 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
-                    Ok(SubmissionResult::response(response))
+                    // Merge attachments from both the approved tool(s) and the subsequent loop
+                    pending_attachments.extend(loop_attachments);
+                    Ok(SubmissionResult::response_with_attachments(response, pending_attachments))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
                     pending: new_pending,
@@ -1164,7 +1194,7 @@ impl Agent {
         token: &str,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<Option<OutgoingResponse>, Error> {
         let token = token.trim();
 
         // Clear auth mode regardless of outcome
@@ -1177,7 +1207,11 @@ impl Agent {
 
         let ext_mgr = match self.deps.extension_manager.as_ref() {
             Some(mgr) => mgr,
-            None => return Ok(Some("Extension manager not available.".to_string())),
+            None => {
+                return Ok(Some(OutgoingResponse::text(
+                    "Extension manager not available.",
+                )))
+            }
         };
 
         match ext_mgr.auth(&pending.extension_name, Some(token)).await {
@@ -1212,7 +1246,7 @@ impl Agent {
                                 &message.metadata,
                             )
                             .await;
-                        Ok(Some(msg))
+                        Ok(Some(OutgoingResponse::text(msg)))
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1237,7 +1271,7 @@ impl Agent {
                                 &message.metadata,
                             )
                             .await;
-                        Ok(Some(msg))
+                        Ok(Some(OutgoingResponse::text(msg)))
                     }
                 }
             }
@@ -1267,7 +1301,7 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
-                Ok(Some(msg))
+                Ok(Some(OutgoingResponse::text(msg)))
             }
             Err(e) => {
                 let msg = format!(
@@ -1286,7 +1320,7 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
-                Ok(Some(msg))
+                Ok(Some(OutgoingResponse::text(msg)))
             }
         }
     }

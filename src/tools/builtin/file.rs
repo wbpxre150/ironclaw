@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use tokio::fs;
 
 use crate::context::JobContext;
@@ -316,6 +317,14 @@ impl Tool for WriteFileTool {
                 "content": {
                     "type": "string",
                     "description": "Content to write to the file"
+                },
+                "encoding": {
+                    "type": "string",
+                    "enum": ["text", "base64"],
+                    "description": "Content encoding. Use 'base64' when writing binary files such as \
+                                    screenshots (PNG/JPEG) received from the browser tool. \
+                                    The content will be decoded from base64 before writing. \
+                                    Default: 'text'."
                 }
             },
             "required": ["path", "content"]
@@ -339,14 +348,31 @@ impl Tool for WriteFileTool {
         }
 
         let content = require_str(&params, "content")?;
+        let encoding = params
+            .get("encoding")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text");
 
         let start = std::time::Instant::now();
 
+        // Decode content to bytes based on encoding
+        let bytes: Vec<u8> = match encoding {
+            "base64" => base64::engine::general_purpose::STANDARD
+                .decode(content.trim())
+                .map_err(|e| {
+                    ToolError::InvalidParameters(format!(
+                        "Failed to decode base64 content: {}",
+                        e
+                    ))
+                })?,
+            _ => content.as_bytes().to_vec(),
+        };
+
         // Check content size
-        if content.len() > MAX_WRITE_SIZE {
+        if bytes.len() > MAX_WRITE_SIZE {
             return Err(ToolError::InvalidParameters(format!(
                 "Content too large ({} bytes). Maximum is {} bytes.",
-                content.len(),
+                bytes.len(),
                 MAX_WRITE_SIZE
             )));
         }
@@ -361,13 +387,13 @@ impl Tool for WriteFileTool {
         }
 
         // Write file
-        fs::write(&path, content)
+        fs::write(&path, &bytes)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
 
         let result = serde_json::json!({
             "path": path.display().to_string(),
-            "bytes_written": content.len(),
+            "bytes_written": bytes.len(),
             "success": true
         });
 

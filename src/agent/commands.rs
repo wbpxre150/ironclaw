@@ -639,7 +639,7 @@ impl Agent {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
         match self.handle_system_command(command, args).await? {
-            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Response { content, .. } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),

@@ -638,7 +638,9 @@ impl AppBuilder {
         // so only register them here when the builder didn't already do it.
         let builder_registered_dev_tools = self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
-        if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
+        if (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
+            && !builder_registered_dev_tools
+        {
             tools.register_dev_tools();
         }
 

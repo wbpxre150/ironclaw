@@ -490,12 +490,12 @@ impl Agent {
             };
 
             match self.handle_message(&message).await {
-                Ok(Some(response)) if !response.is_empty() => {
+                Ok(Some(response)) if !response.content.is_empty() => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
-                        content: response.clone(),
+                        content: response.content.clone(),
                         thread_id: message.thread_id.clone(),
                     };
                     match self.hooks().run(&event).await {
@@ -505,9 +505,14 @@ impl Agent {
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
+                            // Hook modified the text; preserve original attachments.
                             if let Err(e) = self
                                 .channels
-                                .respond(&message, OutgoingResponse::text(new_content))
+                                .respond(
+                                    &message,
+                                    OutgoingResponse::text(new_content)
+                                        .with_attachments(response.attachments),
+                                )
                                 .await
                             {
                                 tracing::error!(
@@ -518,11 +523,7 @@ impl Agent {
                             }
                         }
                         _ => {
-                            if let Err(e) = self
-                                .channels
-                                .respond(&message, OutgoingResponse::text(response))
-                                .await
-                            {
+                            if let Err(e) = self.channels.respond(&message, response).await {
                                 tracing::error!(
                                     channel = %message.channel,
                                     error = %e,
@@ -537,7 +538,7 @@ impl Agent {
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
-                        empty_len = empty.len(),
+                        empty_len = empty.content.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
                 }
@@ -587,7 +588,10 @@ impl Agent {
         Ok(())
     }
 
-    async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+    async fn handle_message(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<OutgoingResponse>, Error> {
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 
@@ -601,10 +605,16 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                    return Ok(Some(OutgoingResponse::text(format!(
+                        "[Message rejected: {}]",
+                        reason
+                    ))));
                 }
                 Err(err) => {
-                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                    return Ok(Some(OutgoingResponse::text(format!(
+                        "[Message blocked by hook policy: {}]",
+                        err
+                    ))));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
@@ -713,20 +723,28 @@ impl Agent {
             }
         };
 
-        // Convert SubmissionResult to response string
+        // Convert SubmissionResult to OutgoingResponse
         match result? {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response { content, attachments } => {
                 // Suppress silent replies (e.g. from group chat "nothing to say" responses)
                 if crate::llm::is_silent_reply(&content) {
                     tracing::debug!("Suppressing silent reply token");
                     Ok(None)
                 } else {
-                    Ok(Some(content))
+                    Ok(Some(
+                        OutgoingResponse::text(content).with_attachments(attachments),
+                    ))
                 }
             }
-            SubmissionResult::Ok { message } => Ok(message),
-            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
+            SubmissionResult::Ok { message } => {
+                Ok(message.map(OutgoingResponse::text))
+            }
+            SubmissionResult::Error { message } => {
+                Ok(Some(OutgoingResponse::text(format!("Error: {}", message))))
+            }
+            SubmissionResult::Interrupted => {
+                Ok(Some(OutgoingResponse::text("Interrupted.")))
+            }
             SubmissionResult::NeedApproval {
                 request_id,
                 tool_name,
@@ -749,8 +767,8 @@ impl Agent {
                     )
                     .await;
 
-                // Empty string signals the caller to skip respond() (no duplicate text)
-                Ok(Some(String::new()))
+                // Empty content signals the caller to skip respond() (no duplicate text)
+                Ok(Some(OutgoingResponse::text(String::new())))
             }
         }
     }

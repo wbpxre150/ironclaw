@@ -325,6 +325,8 @@ pub enum SubmissionResult {
     Response {
         /// The agent's response.
         content: String,
+        /// Local file paths collected from tool outputs to send as channel attachments.
+        attachments: Vec<String>,
     },
 
     /// Need approval before continuing.
@@ -356,10 +358,22 @@ pub enum SubmissionResult {
 }
 
 impl SubmissionResult {
-    /// Create a response result.
+    /// Create a response result with no attachments.
     pub fn response(content: impl Into<String>) -> Self {
         Self::Response {
             content: content.into(),
+            attachments: vec![],
+        }
+    }
+
+    /// Create a response result with attachment paths.
+    pub fn response_with_attachments(
+        content: impl Into<String>,
+        attachments: Vec<String>,
+    ) -> Self {
+        Self::Response {
+            content: content.into(),
+            attachments,
         }
     }
 
