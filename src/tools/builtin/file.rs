@@ -391,13 +391,20 @@ impl Tool for WriteFileTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
 
+        let path_str = path.display().to_string();
         let result = serde_json::json!({
-            "path": path.display().to_string(),
+            "path": path_str,
             "bytes_written": bytes.len(),
             "success": true
         });
 
-        Ok(ToolOutput::success(result, start.elapsed()))
+        // Propagate binary files written with base64 encoding as channel attachments
+        // so attachment-capable channels (e.g. Signal) can send them automatically.
+        let mut output = ToolOutput::success(result, start.elapsed());
+        if encoding == "base64" {
+            output = output.with_attachments(std::iter::once(path_str));
+        }
+        Ok(output)
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {

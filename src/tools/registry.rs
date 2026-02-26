@@ -38,10 +38,11 @@ impl WorkspaceReader for WorkspaceReaderAdapter {
     fn read(&self, path: &str) -> Option<String> {
         let ws = Arc::clone(&self.0);
         let path = path.to_string();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { ws.read(&path).await.ok().map(|doc| doc.content) })
-        })
+        // Called from within spawn_blocking: use Handle::block_on directly.
+        // block_in_place must not be used here — it requires a tokio worker thread,
+        // not a blocking-pool thread.
+        tokio::runtime::Handle::current()
+            .block_on(async move { ws.read(&path).await.ok().map(|doc| doc.content) })
     }
 }
 
@@ -53,13 +54,12 @@ impl WorkspaceWriter for WorkspaceWriterAdapter {
         let ws = Arc::clone(&self.0);
         let path = path.to_string();
         let content = content.to_string();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                ws.write(&path, &content)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            })
+        // Called from within spawn_blocking: use Handle::block_on directly.
+        tokio::runtime::Handle::current().block_on(async move {
+            ws.write(&path, &content)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
     }
 }

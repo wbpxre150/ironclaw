@@ -537,6 +537,8 @@ impl near::agent::host::Host for StoreData {
             reject_private_ip(&url)?;
         }
 
+        let connect_timeout = capability.connect_timeout;
+
         // Create WebSocket runtime if not exists
         if self.ws_runtime.is_none() {
             self.ws_runtime = Some(
@@ -551,11 +553,16 @@ impl near::agent::host::Host for StoreData {
             .as_ref()
             .ok_or_else(|| "WebSocket runtime initialization failed".to_string())?;
 
-        // Connect to WebSocket
-        // Use the URL string directly (IntoClientRequest is implemented for &str)
+        // Connect to WebSocket with the capability-configured timeout.
         let (ws_stream, _) = rt.block_on(async {
-            connect_async(&url)
+            tokio::time::timeout(connect_timeout, connect_async(&url))
                 .await
+                .map_err(|_| {
+                    format!(
+                        "WebSocket connection timed out after {}s",
+                        connect_timeout.as_secs()
+                    )
+                })?
                 .map_err(|e| format!("WebSocket connection failed: {}", e))
         })?;
 
@@ -599,6 +606,7 @@ impl near::agent::host::Host for StoreData {
             reject_private_ip(&url)?;
         }
 
+        let connect_timeout = capability.connect_timeout;
         let pool = capability
             .connection_pool
             .as_ref()
@@ -639,8 +647,14 @@ impl near::agent::host::Host for StoreData {
             .map_err(|e| format!("Failed to create pooled WebSocket runtime: {e}"))?;
 
         let (ws_stream, _) = pooled_rt.block_on(async {
-            connect_async(&url)
+            tokio::time::timeout(connect_timeout, connect_async(&url))
                 .await
+                .map_err(|_| {
+                    format!(
+                        "WebSocket connection timed out after {}s",
+                        connect_timeout.as_secs()
+                    )
+                })?
                 .map_err(|e| format!("WebSocket connection failed: {}", e))
         })?;
 
