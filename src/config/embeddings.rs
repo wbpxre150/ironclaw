@@ -21,6 +21,10 @@ pub struct EmbeddingsConfig {
     pub model: String,
     /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
     pub ollama_base_url: String,
+    /// Base URL for llama.cpp embedding server (provider = "llamacpp").
+    pub llamacpp_base_url: String,
+    /// Optional bearer token for llamacpp server (default: none).
+    pub llamacpp_api_key: Option<SecretString>,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
 }
@@ -35,6 +39,8 @@ impl Default for EmbeddingsConfig {
             openai_api_key: None,
             model,
             ollama_base_url: "http://localhost:11434".to_string(),
+            llamacpp_base_url: "http://localhost:8080".to_string(),
+            llamacpp_api_key: None,
             dimension,
         }
     }
@@ -69,8 +75,20 @@ impl EmbeddingsConfig {
             .or_else(|| settings.ollama_base_url.clone())
             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
-        let dimension =
-            parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
+        let llamacpp_base_url = optional_env("EMBEDDING_LLAMACPP_BASE_URL")?
+            .unwrap_or_else(|| settings.embeddings.llamacpp_base_url.clone());
+
+        let llamacpp_api_key = optional_env("EMBEDDING_LLAMACPP_API_KEY")?.map(SecretString::from);
+
+        let dimension = parse_optional_env(
+            "EMBEDDING_DIMENSION",
+            if settings.embeddings.dimension != 1536 {
+                // User explicitly set a dimension in settings; use it as the fallback
+                settings.embeddings.dimension
+            } else {
+                default_dimension_for_model(&model)
+            },
+        )?;
 
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
@@ -80,6 +98,8 @@ impl EmbeddingsConfig {
             openai_api_key,
             model,
             ollama_base_url,
+            llamacpp_base_url,
+            llamacpp_api_key,
             dimension,
         })
     }
@@ -87,6 +107,11 @@ impl EmbeddingsConfig {
     /// Get the OpenAI API key if configured.
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the llama.cpp bearer token if configured.
+    pub fn llamacpp_api_key(&self) -> Option<&str> {
+        self.llamacpp_api_key.as_ref().map(|s| s.expose_secret())
     }
 
     /// Create the appropriate embedding provider based on configuration.
@@ -115,6 +140,19 @@ impl EmbeddingsConfig {
                     crate::workspace::NearAiEmbeddings::new(nearai_base_url, session)
                         .with_model(&self.model, self.dimension),
                 ))
+            }
+            "llamacpp" => {
+                tracing::info!(
+                    "Embeddings enabled via llama.cpp (model: {}, url: {}, dim: {})",
+                    self.model,
+                    self.llamacpp_base_url,
+                    self.dimension,
+                );
+                let provider =
+                    crate::workspace::LlamaCppEmbeddings::new(&self.llamacpp_base_url)
+                        .with_model(&self.model, self.dimension)
+                        .with_api_key(self.llamacpp_api_key().map(str::to_string));
+                Some(Arc::new(provider))
             }
             "ollama" => {
                 tracing::info!(

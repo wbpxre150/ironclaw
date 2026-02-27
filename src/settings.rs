@@ -123,13 +123,21 @@ pub struct EmbeddingsSettings {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Provider to use: "openai" or "nearai".
+    /// Provider to use: "openai", "nearai", "ollama", or "llamacpp".
     #[serde(default = "default_embeddings_provider")]
     pub provider: String,
 
     /// Model to use for embeddings.
     #[serde(default = "default_embeddings_model")]
     pub model: String,
+
+    /// Base URL for the llama.cpp embedding server (provider = "llamacpp").
+    #[serde(default = "default_llamacpp_base_url")]
+    pub llamacpp_base_url: String,
+
+    /// Embedding vector dimension.
+    #[serde(default = "default_embeddings_dimension")]
+    pub dimension: usize,
 }
 
 fn default_embeddings_provider() -> String {
@@ -140,12 +148,22 @@ fn default_embeddings_model() -> String {
     "text-embedding-3-small".to_string()
 }
 
+fn default_llamacpp_base_url() -> String {
+    "http://localhost:8080".to_string()
+}
+
+fn default_embeddings_dimension() -> usize {
+    1536
+}
+
 impl Default for EmbeddingsSettings {
     fn default() -> Self {
         Self {
             enabled: false,
             provider: default_embeddings_provider(),
             model: default_embeddings_model(),
+            llamacpp_base_url: default_llamacpp_base_url(),
+            dimension: default_embeddings_dimension(),
         }
     }
 }

@@ -471,6 +471,153 @@ impl EmbeddingProvider for OllamaEmbeddings {
     }
 }
 
+/// llama.cpp embedding provider using a local `llama-server --embeddings` instance.
+///
+/// Uses the OpenAI-compatible `/v1/embeddings` endpoint exposed by llama-server.
+/// No authentication is required by default; an optional bearer token can be set
+/// for reverse-proxy deployments that enforce auth.
+pub struct LlamaCppEmbeddings {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    dimension: usize,
+    api_key: Option<String>,
+}
+
+impl LlamaCppEmbeddings {
+    /// Create a new llama.cpp embedding provider pointing at `base_url`.
+    ///
+    /// Defaults: model `"default"`, dimension `1024`.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url: base_url.into(),
+            model: "default".to_string(),
+            dimension: 1024,
+            api_key: None,
+        }
+    }
+
+    /// Override the model name and expected dimension.
+    pub fn with_model(mut self, model: impl Into<String>, dimension: usize) -> Self {
+        self.model = model.into();
+        self.dimension = dimension;
+        self
+    }
+
+    /// Set an optional bearer token (ignored by llama-server but may be required by a proxy).
+    pub fn with_api_key(mut self, key: Option<String>) -> Self {
+        self.api_key = key;
+        self
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for LlamaCppEmbeddings {
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn max_input_length(&self) -> usize {
+        32_000
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if text.len() > self.max_input_length() {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max: self.max_input_length(),
+            });
+        }
+
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::InvalidResponse("No embedding returned".to_string()))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let url = format!("{}/v1/embeddings", self.base_url);
+
+        let mut results = Vec::with_capacity(texts.len());
+
+        // llama-server accepts a single `input` string per request; batch one-by-one.
+        for text in texts {
+            let body = serde_json::json!({
+                "model": self.model,
+                "input": text,
+            });
+
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(key) = &self.api_key {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            }
+            let response = req.send().await?;
+
+            let status = response.status();
+
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(EmbeddingError::AuthFailed);
+            }
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs);
+                return Err(EmbeddingError::RateLimited { retry_after });
+            }
+
+            if !status.is_success() {
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(EmbeddingError::HttpError(format!(
+                    "llama-server returned HTTP {}: {}",
+                    status, error_text
+                )));
+            }
+
+            let result: NearAiEmbeddingResponse = response.json().await.map_err(|e| {
+                EmbeddingError::InvalidResponse(format!(
+                    "Failed to parse llama-server response: {}",
+                    e
+                ))
+            })?;
+
+            let embedding = result
+                .data
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    EmbeddingError::InvalidResponse("No embedding in response".to_string())
+                })?
+                .embedding;
+
+            if embedding.len() != self.dimension {
+                return Err(EmbeddingError::InvalidResponse(format!(
+                    "llama-server returned embedding of dimension {}, expected {}",
+                    embedding.len(),
+                    self.dimension
+                )));
+            }
+
+            results.push(embedding);
+        }
+
+        Ok(results)
+    }
+}
+
 /// A mock embedding provider for testing.
 ///
 /// Generates deterministic embeddings based on text hash.
