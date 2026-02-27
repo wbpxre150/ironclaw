@@ -97,6 +97,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Routines (cron/scheduled tasks) configuration.
+    #[serde(default)]
+    pub routines: RoutinesSettings,
 }
 
 /// Source for the secrets master key.
@@ -307,6 +311,58 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+        }
+    }
+}
+
+/// Routines (cron/scheduled tasks) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutinesSettings {
+    /// Whether the routines system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How often (seconds) to poll for cron routines that need firing.
+    #[serde(default = "default_routines_cron_interval")]
+    pub cron_check_interval_secs: u64,
+
+    /// Max routines executing concurrently across all users.
+    #[serde(default = "default_routines_max_concurrent")]
+    pub max_concurrent_routines: usize,
+
+    /// Default cooldown between fires (seconds).
+    #[serde(default = "default_routines_default_cooldown")]
+    pub default_cooldown_secs: u64,
+
+    /// Max output tokens for lightweight routine LLM calls.
+    #[serde(default = "default_routines_max_tokens")]
+    pub max_lightweight_tokens: u32,
+}
+
+fn default_routines_cron_interval() -> u64 {
+    15
+}
+
+fn default_routines_max_concurrent() -> usize {
+    10
+}
+
+fn default_routines_default_cooldown() -> u64 {
+    300
+}
+
+fn default_routines_max_tokens() -> u32 {
+    4096
+}
+
+impl Default for RoutinesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cron_check_interval_secs: default_routines_cron_interval(),
+            max_concurrent_routines: default_routines_max_concurrent(),
+            default_cooldown_secs: default_routines_default_cooldown(),
+            max_lightweight_tokens: default_routines_max_tokens(),
         }
     }
 }

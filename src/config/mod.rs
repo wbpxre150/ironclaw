@@ -197,7 +197,7 @@ impl Config {
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve()?,
-            routines: RoutineConfig::resolve()?,
+            routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             sidecar: SidecarConfig::resolve()?,
