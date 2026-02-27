@@ -33,8 +33,8 @@ cmake -B build \
 cmake --build build -j$(nproc)
 
 # Add to PATH
-echo 'export PATH=$PATH:'"$HOME/llama.cpp/build/bin" >> ~/.bashrc
-source ~/.bashrc
+echo 'export PATH=$PATH:'"$HOME/llama.cpp/build/bin" >> ~/.zshrc
+source ~/.zshrc
 ```
 
 If `nvcc` fails with a GCC version error:
@@ -51,13 +51,9 @@ cmake --build build -j$(nproc)
 ## 2. Download the Model
 
 ```bash
-pip install --user huggingface_hub
 mkdir -p ~/models/embeddings
-
-huggingface-cli download \
-  ChristianAzinn/mxbai-embed-large-v1-gguf \
-  mxbai-embed-large-v1-f16.GGUF \
-  --local-dir ~/models/embeddings
+wget -O ~/models/embeddings/mxbai-embed-large-v1-f16.GGUF \
+  https://huggingface.co/ChristianAzinn/mxbai-embed-large-v1-gguf/resolve/main/mxbai-embed-large-v1-f16.GGUF
 ```
 
 The F16 file is ~420 MB and fits entirely in VRAM. Use `-ngl 99` to offload all layers.
@@ -134,11 +130,12 @@ export LD_LIBRARY_PATH=/opt/cuda/lib64:$LD_LIBRARY_PATH
 - The F16 model uses ~420 MB VRAM, well within 4 GB. If other processes are consuming
   VRAM, close them first or switch to Q8_0 (~220 MB):
   ```bash
-  huggingface-cli download \
-    ChristianAzinn/mxbai-embed-large-v1-gguf \
-    mxbai-embed-large-v1-q8_0.GGUF \
-    --local-dir ~/models/embeddings
+  wget -O ~/models/embeddings/mxbai-embed-large-v1-f16.GGUF \
+    https://huggingface.co/ChristianAzinn/mxbai-embed-large-v1-gguf/resolve/main/mxbai-embed-large-v1-q8_0.GGUF
   ```
+  Then update the server command to use the same path (`~/models/embeddings/mxbai-embed-large-v1-f16.GGUF`)
+  — the filename you save it as is what `-m` points to, so keeping the name consistent means no other
+  commands need to change.
 
 **Wrong dimensions / search returning garbage:**
 - Ensure `EMBEDDING_DIMENSION=1024` matches the model output.
