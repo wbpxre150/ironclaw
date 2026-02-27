@@ -272,6 +272,16 @@ impl Tool for HttpTool {
             }
         };
 
+        // Inject Accept: text/markdown for GET requests when the caller hasn't
+        // set an Accept header. Sites with Cloudflare Markdown for Agents return
+        // markdown instead of HTML, which is far more token-efficient.
+        let caller_set_accept = headers_vec
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("accept"));
+        if method.eq_ignore_ascii_case("GET") && !caller_set_accept {
+            headers_vec.push(("Accept".to_string(), "text/markdown, */*;q=0.8".to_string()));
+        }
+
         // Add headers
         for (key, value) in &headers_vec {
             request = request.header(key.as_str(), value.as_str());
